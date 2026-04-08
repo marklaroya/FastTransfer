@@ -819,8 +819,8 @@ async function startSend() {
         targetAddr: elements.manualMode.checked ? elements.targetAddress.value.trim() : null,
         certificatePath: elements.manualMode.checked ? elements.certificatePath.value : null,
         serverName: elements.serverName.value.trim() || "fasttransfer.local",
-        chunkSize: Number(elements.chunkSize.value || 1048576),
-        parallelism: Number(elements.parallelism.value || 4),
+        chunkSize: Number(elements.chunkSize.value || 4194304),
+        parallelism: Number(elements.parallelism.value || 8),
       },
     });
 
@@ -1072,6 +1072,7 @@ bootstrap().catch((error) => {
   applySendStatus({ state: "error", message: `App bootstrap failed: ${error}` });
   applyReceiverStatus({ state: "error", message: `App bootstrap failed: ${error}` });
 });
+
 
 
 

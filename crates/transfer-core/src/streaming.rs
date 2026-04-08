@@ -20,14 +20,14 @@ use protocol::{
 use quic_transport::{IncomingConnection, QuicReceiver, QuicSender};
 use resume::PersistentFileResumeState;
 use tokio::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
     sync::Semaphore,
     task::{spawn_blocking, JoinSet},
 };
 
 use crate::{
-    configure_reporter, file_io, sender_checkpoint_base_dir, ProgressListener, ProgressReporter,
+    configure_reporter, sender_checkpoint_base_dir, ProgressListener, ProgressReporter,
     ReceivedTransfer, SendRequest, TransferSummary,
 };
 
@@ -632,19 +632,41 @@ async fn send_file_chunks(
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut join_set = JoinSet::new();
 
+    let mut file = File::open(source_path)
+        .await
+        .with_context(|| format!("failed to open source file {}", source_path.display()))?;
+    let mut current_offset = 0_u64;
+
     for descriptor in descriptors {
         let descriptor = descriptor.clone();
-        let source_path = source_path.to_path_buf();
-        let transport = Arc::clone(transport);
         let permit = semaphore
             .clone()
             .acquire_owned()
             .await
             .context("failed to acquire sender chunk scheduling permit")?;
 
+        if descriptor.offset != current_offset {
+            file.seek(SeekFrom::Start(descriptor.offset))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to seek source file {} to offset {}",
+                        source_path.display(),
+                        descriptor.offset
+                    )
+                })?;
+            current_offset = descriptor.offset;
+        }
+
+        let mut payload = vec![0_u8; descriptor.size as usize];
+        file.read_exact(&mut payload)
+            .await
+            .with_context(|| format!("failed to read source chunk {}", descriptor.index))?;
+        current_offset = current_offset.saturating_add(u64::from(descriptor.size));
+
+        let transport = Arc::clone(transport);
         join_set.spawn(async move {
             let _permit = permit;
-            let payload = file_io::read_chunk(&source_path, &descriptor).await?;
             let header = ChunkStreamHeader {
                 file_index: file_id,
                 descriptor: descriptor.clone(),
@@ -692,9 +714,11 @@ async fn receive_file_chunks(
         .with_context(|| format!("failed to size destination file {}", destination.display()))?;
 
     let mut seen_chunks = HashSet::with_capacity(descriptors.len());
+    let destination_path = destination.to_path_buf();
+    let mut join_set = JoinSet::new();
 
     for _ in 0..descriptors.len() {
-        let mut chunk = incoming.accept_chunk_stream().await?;
+        let chunk = incoming.accept_chunk_stream().await?;
         validate_incoming_chunk(file_entry.file_id, &descriptors, &chunk.header)?;
 
         if !seen_chunks.insert(chunk.header.descriptor.index) {
@@ -705,9 +729,19 @@ async fn receive_file_chunks(
             );
         }
 
-        write_chunk_stream(destination, &chunk.header, &mut chunk.stream).await?;
+        let header = chunk.header.clone();
+        let mut stream = chunk.stream;
+        let destination_path = destination_path.clone();
+        join_set.spawn(async move {
+            write_chunk_stream(destination_path.as_path(), &header, &mut stream).await?;
+            Ok::<u32, anyhow::Error>(header.descriptor.size)
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        let chunk_size = result.context("receiver chunk task panicked")??;
         reporter.set_phase("sending");
-        reporter.advance(u64::from(chunk.header.descriptor.size));
+        reporter.advance(u64::from(chunk_size));
     }
 
     if seen_chunks.len() != descriptors.len() {
@@ -960,5 +994,9 @@ fn root_name(source_path: &Path) -> Result<String> {
             )
         })
 }
+
+
+
+
 
 

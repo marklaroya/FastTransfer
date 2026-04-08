@@ -31,8 +31,8 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 pub use file_io::SourceInspection as TransferSourceSummary;
 pub use progress::ProgressUpdate as TransferProgress;
-pub const DEFAULT_CHUNK_SIZE: u32 = 1_048_576;
-pub const DEFAULT_PARALLELISM: usize = 4;
+pub const DEFAULT_CHUNK_SIZE: u32 = 4_194_304;
+pub const DEFAULT_PARALLELISM: usize = 8;
 
 #[derive(Debug)]
 pub struct TransferPlan {
@@ -650,6 +650,7 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
+
 
 
 

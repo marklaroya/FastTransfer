@@ -3407,6 +3407,8 @@ version = "0.1.0"
 dependencies = [
  "integrity",
  "protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
