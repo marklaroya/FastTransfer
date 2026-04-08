@@ -1,3 +1,4 @@
+﻿
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -10,15 +11,17 @@ const elements = {
   viewTitle: $("#view-title"),
   viewSubtitle: $("#view-subtitle"),
   globalRefresh: $("#global-refresh"),
+  newTransfer: $("#new-transfer"),
+  networkBadge: $("#network-badge"),
+  networkSummary: $("#network-summary"),
   statusLeft: $("#status-left"),
   statusCenter: $("#status-center"),
   statusRight: $("#status-right"),
-  sidebarReceiverState: $("#sidebar-receiver-state"),
-  sidebarSelectedDevice: $("#sidebar-selected-device"),
 
   sourcePath: $("#source-path"),
   pickSourceFile: $("#pick-source-file"),
   pickSourceFolder: $("#pick-source-folder"),
+  deviceSearch: $("#device-search"),
   refreshDevicesSend: $("#refresh-devices-send"),
   refreshDevicesView: $("#refresh-devices-view"),
   sendDeviceList: $("#send-device-list"),
@@ -31,6 +34,7 @@ const elements = {
   sendTargetAddress: $("#send-target-address"),
   sendTargetFingerprint: $("#send-target-fingerprint"),
   sendTargetTrust: $("#send-target-trust"),
+  actionTargetName: $("#action-target-name"),
 
   packageKindBadge: $("#package-kind-badge"),
   packageSummaryMessage: $("#package-summary-message"),
@@ -55,6 +59,7 @@ const elements = {
   sendProgressText: $("#send-progress-text"),
   sendSpeed: $("#send-speed"),
   sendSummaryFile: $("#send-summary-file"),
+  sendSummaryMeta: $("#send-summary-meta"),
   sendSummaryBytes: $("#send-summary-bytes"),
   sendSummaryChunks: $("#send-summary-chunks"),
   sendSummaryHash: $("#send-summary-hash"),
@@ -63,6 +68,7 @@ const elements = {
   receiverToggle: $("#receiver-toggle"),
   browseOutput: $("#browse-output"),
   receiverOutput: $("#receiver-output"),
+  receiverOutputLabel: $("#receiver-output-label"),
   receiverBadge: $("#receiver-badge"),
   receiverMessage: $("#receiver-message"),
   receiverProgressBar: $("#receiver-progress-bar"),
@@ -95,29 +101,30 @@ const elements = {
 const viewMeta = {
   send: {
     title: "Send",
-    subtitle: "Choose a file or folder and send it to a nearby receiver.",
+    subtitle: "Choose a nearby device, pick a file or folder, and send it over secure LAN.",
   },
   receive: {
     title: "Receive",
-    subtitle: "Control the receiver and review recent incoming transfers.",
+    subtitle: "Listen for nearby transfers and keep recent received items within reach.",
   },
   transfers: {
     title: "Transfers",
-    subtitle: "Track active and completed send and receive activity.",
+    subtitle: "Track active and completed transfers in one compact queue.",
   },
   devices: {
     title: "Devices",
-    subtitle: "Inspect nearby receivers and their LAN trust identities.",
+    subtitle: "Review nearby devices, trust state, and LAN identity details.",
   },
   settings: {
     title: "Settings",
-    subtitle: "Review default folders and desktop transfer preferences.",
+    subtitle: "Adjust receive location, discovery behavior, and advanced desktop options.",
   },
 };
 
 const appState = {
   currentView: "send",
   devices: [],
+  deviceSearch: "",
   selectedPeerId: null,
   sourceSummary: null,
   sendBusy: false,
@@ -127,6 +134,8 @@ const appState = {
   receiverMessage: "Receiver stopped.",
   receiveOutputDir: null,
   receiveOutputLabel: "Downloads/FastTransfer",
+  receiverBindAddr: "Not listening",
+  receiverCertificateName: "Pending",
   transfers: [],
   transferCounter: 0,
   currentSendTransferId: null,
@@ -157,8 +166,19 @@ function formatBytes(bytes) {
 
 function basename(path) {
   if (!path) return "";
-  const parts = String(path).split(/[/\\]/).filter(Boolean);
+  const parts = String(path).split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? path;
+}
+
+function simplifiedPathLabel(path) {
+  if (!path) return "Downloads/FastTransfer";
+  const normalized = String(path).replaceAll("\\", "/");
+  const downloadsMatch = normalized.match(/(?:^|\/)(Downloads\/FastTransfer.*)$/i);
+  if (downloadsMatch) return downloadsMatch[1];
+  const desktopMatch = normalized.match(/(?:^|\/)(Desktop\/FastTransfer.*)$/i);
+  if (desktopMatch) return desktopMatch[1];
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || normalized;
 }
 
 function formatTime(timestamp) {
@@ -170,30 +190,52 @@ function formatTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
-function setBadge(node, label, kind) {
-  node.textContent = label;
-  node.className = `badge ${kind}`;
+function inferDeviceType(device) {
+  const text = `${device.deviceName ?? ""} ${device.serviceName ?? ""}`.toLowerCase();
+  if (/(pixel|iphone|phone|android|mobile)/.test(text)) return "phone";
+  if (/(studio|desktop|pc|tower|workstation)/.test(text)) return "desktop";
+  return "laptop";
 }
 
-function badgeKindForTrust(trustState) {
+function deviceGlyph(device) {
+  const type = inferDeviceType(device);
+  if (type === "phone") return "Phone";
+  if (type === "desktop") return "Desktop";
+  return "Laptop";
+}
+
+function setPill(node, label, kind = "idle") {
+  node.textContent = label;
+  node.className = `pill pill-${kind}`;
+}
+
+function trustKind(trustState) {
   if (trustState === "known_device") return "success";
   if (trustState === "trusted_for_session") return "active";
   if (trustState === "fingerprint_mismatch") return "error";
   return "idle";
 }
 
-function labelForTrust(trustState) {
+function trustLabel(trustState) {
   if (trustState === "known_device") return "Known device";
-  if (trustState === "trusted_for_session") return "Trusted this session";
+  if (trustState === "trusted_for_session") return "Trusted for this session";
   if (trustState === "fingerprint_mismatch") return "Fingerprint changed";
+  return "Unverified";
+}
+
+function packageKindLabel(rootKind) {
+  if (rootKind === "directory") return "Folder";
+  if (rootKind === "file") return "File";
   return "Unknown";
 }
 
-function labelForPackageKind(rootKind) {
-  return rootKind === "directory" ? "Folder package" : rootKind === "file" ? "Single file" : "Unknown";
+function packageKindBadgeLabel(rootKind) {
+  if (rootKind === "directory") return "Folder package";
+  if (rootKind === "file") return "Single file";
+  return "Unknown";
 }
 
-function labelForTransferState(state) {
+function stateLabel(state) {
   if (state === "starting") return "Starting";
   if (state === "sending") return "Sending";
   if (state === "receiving") return "Receiving";
@@ -201,18 +243,51 @@ function labelForTransferState(state) {
   if (state === "error") return "Error";
   if (state === "listening") return "Listening";
   if (state === "stopped") return "Stopped";
+  if (state === "stopping") return "Stopping";
   return "Idle";
 }
 
-function kindForTransferState(state) {
+function stateKind(state) {
   if (state === "completed") return "success";
   if (state === "error") return "error";
-  if (state === "starting" || state === "sending" || state === "receiving" || state === "listening") return "active";
+  if (["starting", "sending", "receiving", "listening", "stopping"].includes(state)) return "active";
   return "idle";
+}
+
+function statusChipClass(status) {
+  const lower = String(status).toLowerCase();
+  if (lower.includes("complete")) return "complete";
+  if (["sending", "receiving", "listening", "starting", "stopping"].includes(lower)) return lower;
+  if (["queued", "idle"].includes(lower)) return lower;
+  return "error";
 }
 
 function selectedDevice() {
   return appState.devices.find((device) => device.peerId === appState.selectedPeerId) ?? null;
+}
+
+function filteredDevices() {
+  const search = appState.deviceSearch.trim().toLowerCase();
+  if (!search) return appState.devices;
+  return appState.devices.filter((device) => {
+    const haystack = [
+      device.deviceName,
+      device.addresses?.join(" "),
+      device.shortFingerprint,
+      trustLabel(device.trustState),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(search);
+  });
+}
+
+function selectDefaultDevice() {
+  const current = selectedDevice();
+  if (current) return;
+  const preferred = appState.devices.find((device) => device.trustState !== "fingerprint_mismatch");
+  appState.selectedPeerId = preferred?.peerId ?? null;
 }
 
 function syncReceiveFolderDisplays(label, absolutePath = null) {
@@ -220,8 +295,10 @@ function syncReceiveFolderDisplays(label, absolutePath = null) {
   if (absolutePath !== null) {
     appState.receiveOutputDir = absolutePath;
   }
-  elements.receiverOutput.value = appState.receiveOutputLabel;
-  elements.settingsReceiveFolder.value = absolutePath ?? appState.receiveOutputLabel;
+  const display = simplifiedPathLabel(appState.receiveOutputLabel);
+  elements.receiverOutputLabel.textContent = display;
+  elements.receiverOutput.value = appState.receiveOutputDir ?? appState.receiveOutputLabel;
+  elements.settingsReceiveFolder.value = appState.receiveOutputDir ?? appState.receiveOutputLabel;
 }
 
 function switchView(view) {
@@ -243,26 +320,29 @@ function switchView(view) {
 function renderPackageSummary() {
   const summary = appState.sourceSummary;
   if (!summary) {
-    setBadge(elements.packageKindBadge, "Nothing selected", "idle");
-    elements.packageSummaryMessage.textContent = "Choose a file or folder to preview the package structure before sending.";
     elements.packageRootName.textContent = "Pending";
     elements.packageRootKind.textContent = "Pending";
     elements.packageTotalFiles.textContent = "0";
     elements.packageTotalFolders.textContent = "0";
     elements.packageTotalBytes.textContent = "0 B";
-    elements.sendSummaryFile.textContent = "Not started";
+    elements.packageKindBadge.textContent = "Nothing selected";
+    elements.packageSummaryMessage.textContent = "Choose a file or folder to preview the package structure before sending.";
+    elements.sendSummaryFile.textContent = "Waiting";
+    elements.sendSummaryMeta.textContent = "Not started";
     return;
   }
 
-  const kindLabel = labelForPackageKind(summary.rootKind);
-  setBadge(elements.packageKindBadge, kindLabel, summary.rootKind === "directory" ? "active" : "success");
-  elements.packageSummaryMessage.textContent = `Ready to send ${summary.rootName} with ${summary.totalFiles.toLocaleString()} file${summary.totalFiles === 1 ? "" : "s"}.`;
   elements.packageRootName.textContent = summary.rootName;
-  elements.packageRootKind.textContent = kindLabel;
-  elements.packageTotalFiles.textContent = summary.totalFiles.toLocaleString();
-  elements.packageTotalFolders.textContent = summary.totalDirectories.toLocaleString();
+  elements.packageRootKind.textContent = packageKindLabel(summary.rootKind);
+  elements.packageTotalFiles.textContent = Number(summary.totalFiles).toLocaleString();
+  elements.packageTotalFolders.textContent = Number(summary.totalDirectories).toLocaleString();
   elements.packageTotalBytes.textContent = formatBytes(summary.totalBytes);
-  elements.sendSummaryFile.textContent = summary.rootName;
+  elements.packageKindBadge.textContent = packageKindBadgeLabel(summary.rootKind);
+  elements.packageSummaryMessage.textContent = `Ready to send ${summary.rootName} with ${Number(summary.totalFiles).toLocaleString()} file${Number(summary.totalFiles) === 1 ? "" : "s"}.`;
+  if (!appState.sendBusy) {
+    elements.sendSummaryFile.textContent = summary.rootName;
+    elements.sendSummaryMeta.textContent = `${formatBytes(summary.totalBytes)} • ${packageKindLabel(summary.rootKind)}`;
+  }
 }
 
 async function setSourcePath(path) {
@@ -273,53 +353,52 @@ async function setSourcePath(path) {
   try {
     const summary = await invoke("inspect_source", { sourcePath: path });
     appState.sourceSummary = summary;
-    renderPackageSummary();
+    renderAll();
   } catch (error) {
     appState.sourceSummary = null;
-    renderPackageSummary();
+    renderAll();
     applySendStatus({ state: "error", message: `Failed to inspect source: ${error}` });
   }
 }
-
 function renderSelectedTarget() {
   if (elements.manualMode.checked) {
     const address = elements.targetAddress.value.trim();
     const hasCert = Boolean(elements.certificatePath.value);
-    setBadge(elements.sendTargetBadge, "Manual", address ? "active" : "idle");
-    elements.sendTargetMessage.textContent = "Manual target mode is enabled for direct receiver entry.";
+    setPill(elements.sendTargetBadge, "Manual", address ? "active" : "idle");
     elements.sendTargetName.textContent = "Manual target";
     elements.sendTargetAddress.textContent = address || "Pending";
+    elements.sendTargetMessage.textContent = "Manual target mode is enabled for direct receiver entry.";
     elements.sendTargetFingerprint.textContent = hasCert ? basename(elements.certificatePath.value) : "Pending";
     elements.sendTargetTrust.textContent = hasCert ? "Manual certificate" : "Awaiting certificate";
-    elements.sidebarSelectedDevice.textContent = address || "Manual target";
+    elements.actionTargetName.textContent = address || "manual target";
     return;
   }
 
   const device = selectedDevice();
   if (!device) {
-    setBadge(elements.sendTargetBadge, "No target", "idle");
-    elements.sendTargetMessage.textContent = "Select a nearby receiver or use manual target mode.";
-    elements.sendTargetName.textContent = "Pending";
+    setPill(elements.sendTargetBadge, "No target", "idle");
+    elements.sendTargetName.textContent = "No device selected";
     elements.sendTargetAddress.textContent = "Pending";
+    elements.sendTargetMessage.textContent = "Choose a nearby receiver or use manual mode.";
     elements.sendTargetFingerprint.textContent = "Pending";
     elements.sendTargetTrust.textContent = "Pending";
-    elements.sidebarSelectedDevice.textContent = "None";
+    elements.actionTargetName.textContent = "selected device";
     return;
   }
 
-  setBadge(elements.sendTargetBadge, labelForTrust(device.trustState), badgeKindForTrust(device.trustState));
-  elements.sendTargetMessage.textContent = device.trustMessage;
+  setPill(elements.sendTargetBadge, trustLabel(device.trustState), trustKind(device.trustState));
   elements.sendTargetName.textContent = device.deviceName;
   elements.sendTargetAddress.textContent = device.addresses[0] ?? "Pending";
+  elements.sendTargetMessage.textContent = device.trustMessage;
   elements.sendTargetFingerprint.textContent = device.shortFingerprint;
-  elements.sendTargetTrust.textContent = labelForTrust(device.trustState);
-  elements.sidebarSelectedDevice.textContent = device.deviceName;
+  elements.sendTargetTrust.textContent = trustLabel(device.trustState);
+  elements.actionTargetName.textContent = device.deviceName;
 }
 
 function renderDeviceIdentity() {
   const device = selectedDevice();
   if (!device) {
-    setBadge(elements.deviceDetailBadge, "None", "idle");
+    setPill(elements.deviceDetailBadge, "None", "idle");
     elements.deviceDetailMessage.textContent = "Select a nearby device to inspect its identity information.";
     elements.deviceDetailName.textContent = "Pending";
     elements.deviceDetailAddress.textContent = "Pending";
@@ -328,38 +407,67 @@ function renderDeviceIdentity() {
     return;
   }
 
-  setBadge(elements.deviceDetailBadge, labelForTrust(device.trustState), badgeKindForTrust(device.trustState));
+  setPill(elements.deviceDetailBadge, trustLabel(device.trustState), trustKind(device.trustState));
   elements.deviceDetailMessage.textContent = device.trustMessage;
   elements.deviceDetailName.textContent = device.deviceName;
   elements.deviceDetailAddress.textContent = device.addresses[0] ?? "Pending";
   elements.deviceDetailFingerprint.textContent = device.shortFingerprint;
-  elements.deviceDetailTrust.textContent = labelForTrust(device.trustState);
+  elements.deviceDetailTrust.textContent = trustLabel(device.trustState);
 }
 
-function deviceRowMarkup(device, index) {
+function sendDeviceCardMarkup(device, index) {
   const selected = device.peerId === appState.selectedPeerId;
-  const trustLabel = labelForTrust(device.trustState);
-  const buttonLabel = selected ? "Selected" : "Use";
-  const disabled = device.trustState === "fingerprint_mismatch" ? "disabled" : "";
+  const mismatch = device.trustState === "fingerprint_mismatch";
   return `
-    <div class="list-item${selected ? " selected" : ""}">
-      <div>
-        <strong>${escapeHtml(device.deviceName)}</strong>
-        <p>${escapeHtml(device.addresses.join(", ") || "No address")}</p>
-        <div class="list-item-meta">
-          <span class="badge ${badgeKindForTrust(device.trustState)}">${escapeHtml(trustLabel)}</span>
-          <span class="badge idle">${escapeHtml(device.shortFingerprint)}</span>
+    <button class="device-list-card${selected ? " selected" : ""}" type="button" data-device-index="${index}" ${mismatch ? "disabled" : ""}>
+      <div class="device-main">
+        <div class="device-icon">${escapeHtml(deviceGlyph(device))}</div>
+        <div>
+          <div class="device-name">${escapeHtml(device.deviceName)}</div>
+          <div class="device-address">${escapeHtml(device.addresses[0] ?? "No address")}</div>
+          <div class="device-badges">
+            <span class="pill pill-${trustKind(device.trustState)}">${escapeHtml(trustLabel(device.trustState))}</span>
+            <span class="pill">${escapeHtml(device.shortFingerprint)}</span>
+          </div>
         </div>
       </div>
-      <button type="button" data-device-index="${index}" ${disabled}>${buttonLabel}</button>
-    </div>
+      <span class="pill pill-${selected ? "active" : "idle"}">${selected ? "Selected" : "Use"}</span>
+    </button>
   `;
 }
 
-function bindDeviceButtons(container) {
+function devicesGridMarkup(device, index) {
+  const selected = device.peerId === appState.selectedPeerId;
+  return `
+    <button class="device-grid-card${selected ? " selected" : ""}" type="button" data-device-index="${index}">
+      <div class="device-grid-top">
+        <div class="device-main">
+          <div class="device-icon">${escapeHtml(deviceGlyph(device))}</div>
+          <div>
+            <div class="device-name">${escapeHtml(device.deviceName)}</div>
+            <div class="device-address">${escapeHtml(device.addresses[0] ?? "No address")}</div>
+          </div>
+        </div>
+        <span class="pill pill-${trustKind(device.trustState)}">${escapeHtml(trustLabel(device.trustState))}</span>
+      </div>
+      <div class="device-grid-meta">
+        <div>
+          <span>Fingerprint</span>
+          <strong>${escapeHtml(device.shortFingerprint)}</strong>
+        </div>
+        <div>
+          <span>Transport</span>
+          <strong>${escapeHtml(device.transport ?? "QUIC")}</strong>
+        </div>
+      </div>
+    </button>
+  `;
+}
+
+function bindDeviceButtons(container, sourceList) {
   for (const button of container.querySelectorAll("[data-device-index]")) {
     button.addEventListener("click", () => {
-      const device = appState.devices[Number(button.dataset.deviceIndex)];
+      const device = sourceList[Number(button.dataset.deviceIndex)];
       if (!device || device.trustState === "fingerprint_mismatch") return;
       appState.selectedPeerId = device.peerId;
       elements.manualMode.checked = false;
@@ -369,35 +477,38 @@ function bindDeviceButtons(container) {
 }
 
 function renderDeviceLists() {
-  if (!appState.devices.length) {
-    const message = "No nearby receivers were found. Start a receiver on the same LAN and refresh.";
-    elements.sendDeviceList.className = "list-panel empty-state";
-    elements.sendDeviceList.textContent = message;
-    elements.devicesNearbyList.className = "list-panel empty-state";
-    elements.devicesNearbyList.textContent = message;
+  const visibleDevices = filteredDevices();
+  if (!visibleDevices.length) {
+    const empty = appState.devices.length
+      ? "No devices match your search."
+      : "No nearby receivers found. Start a receiver on the same LAN and refresh.";
+    elements.sendDeviceList.className = "device-list empty-state";
+    elements.sendDeviceList.textContent = empty;
+    elements.devicesNearbyList.className = "device-grid empty-state";
+    elements.devicesNearbyList.textContent = empty;
   } else {
-    const markup = appState.devices.map(deviceRowMarkup).join("");
-    elements.sendDeviceList.className = "list-panel";
-    elements.sendDeviceList.innerHTML = markup;
-    elements.devicesNearbyList.className = "list-panel";
-    elements.devicesNearbyList.innerHTML = markup;
-    bindDeviceButtons(elements.sendDeviceList);
-    bindDeviceButtons(elements.devicesNearbyList);
+    elements.sendDeviceList.className = "device-list";
+    elements.sendDeviceList.innerHTML = visibleDevices.map(sendDeviceCardMarkup).join("");
+    bindDeviceButtons(elements.sendDeviceList, visibleDevices);
+
+    elements.devicesNearbyList.className = "device-grid";
+    elements.devicesNearbyList.innerHTML = visibleDevices.map(devicesGridMarkup).join("");
+    bindDeviceButtons(elements.devicesNearbyList, visibleDevices);
   }
 
   const trusted = appState.devices.filter((device) => device.trustState !== "unknown");
   if (!trusted.length) {
-    elements.trustedDeviceList.className = "list-panel empty-state";
-    elements.trustedDeviceList.textContent = "No trusted devices are available in the current LAN scan.";
+    elements.trustedDeviceList.className = "trusted-list empty-state";
+    elements.trustedDeviceList.textContent = "No trusted devices yet.";
   } else {
-    elements.trustedDeviceList.className = "list-panel";
+    elements.trustedDeviceList.className = "trusted-list";
     elements.trustedDeviceList.innerHTML = trusted
       .map(
         (device) => `
           <div class="trusted-item">
             <strong>${escapeHtml(device.deviceName)}</strong>
-            <span>${escapeHtml(labelForTrust(device.trustState))} � ${escapeHtml(device.shortFingerprint)}</span>
-            <span>${escapeHtml(device.addresses[0] ?? "No address")}</span>
+            <span>${escapeHtml(trustLabel(device.trustState))}</span>
+            <span>${escapeHtml(device.shortFingerprint)} • ${escapeHtml(device.addresses[0] ?? "No address")}</span>
           </div>
         `,
       )
@@ -407,38 +518,39 @@ function renderDeviceLists() {
 
 function renderRecentReceived() {
   if (!appState.recentReceived.length) {
-    elements.recentReceivedList.className = "list-panel empty-state";
+    elements.recentReceivedList.className = "received-list empty-state";
     elements.recentReceivedList.textContent = "No received items yet.";
     return;
   }
 
-  elements.recentReceivedList.className = "list-panel";
+  elements.recentReceivedList.className = "received-list";
   elements.recentReceivedList.innerHTML = appState.recentReceived
     .map(
       (item) => `
-        <div class="recent-item">
+        <div class="received-item">
           <strong>${escapeHtml(item.name)}</strong>
+          <span>${escapeHtml(item.when)}</span>
           <span>${escapeHtml(item.path)}</span>
-          <span>${escapeHtml(item.remote)} � ${escapeHtml(formatTime(item.timestamp))}</span>
         </div>
       `,
     )
     .join("");
 }
 
-function createTransfer(direction, name, destination) {
+function createTransfer(direction, kind, name, destination) {
   const id = `transfer-${++appState.transferCounter}`;
   appState.transfers.unshift({
     id,
     direction,
+    kind,
     name,
+    destination,
     status: "Idle",
     progress: "0%",
     speed: "0.00 MiB/s",
-    destination,
     updatedAt: Date.now(),
   });
-  appState.transfers = appState.transfers.slice(0, 20);
+  appState.transfers = appState.transfers.slice(0, 30);
   return id;
 }
 
@@ -448,10 +560,10 @@ function updateTransfer(id, patch) {
   Object.assign(transfer, patch, { updatedAt: Date.now() });
 }
 
-function ensureTransfer(slotKey, direction, name, destination) {
+function ensureTransfer(slotKey, direction, kind, name, destination) {
   let id = appState[slotKey];
   if (!id) {
-    id = createTransfer(direction, name, destination);
+    id = createTransfer(direction, kind, name, destination);
     appState[slotKey] = id;
   }
   return id;
@@ -461,44 +573,133 @@ function renderTransfers() {
   if (!appState.transfers.length) {
     elements.transfersTableBody.innerHTML = `
       <tr>
-        <td colspan="5" class="table-empty">No transfer activity yet.</td>
+        <td colspan="6" class="table-empty">No transfer activity yet.</td>
       </tr>
     `;
     return;
   }
 
-  const rows = [...appState.transfers]
+  elements.transfersTableBody.innerHTML = [...appState.transfers]
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map(
       (transfer) => `
         <tr>
-          <td>${escapeHtml(`${transfer.direction}: ${transfer.name}`)}</td>
-          <td><span class="status-pill">${escapeHtml(transfer.status)}</span></td>
+          <td>${escapeHtml(transfer.name)}</td>
+          <td>${escapeHtml(transfer.kind)}</td>
+          <td>${escapeHtml(transfer.destination)}</td>
+          <td><span class="status-chip ${statusChipClass(transfer.status)}">${escapeHtml(transfer.status)}</span></td>
           <td>${escapeHtml(transfer.progress)}</td>
           <td>${escapeHtml(transfer.speed)}</td>
-          <td>${escapeHtml(transfer.destination)}</td>
         </tr>
       `,
     )
     .join("");
-
-  elements.transfersTableBody.innerHTML = rows;
 }
 
 function setReceiverToggle() {
-  elements.receiverToggle.disabled = appState.receiverState === "starting";
-  elements.receiverToggle.textContent = appState.receiverActive ? "Stop receiver" : "Start receiver";
+  const busy = ["starting", "stopping"].includes(appState.receiverState);
+  elements.receiverToggle.disabled = busy;
+  if (appState.receiverActive) {
+    elements.receiverToggle.textContent = "Stop receiver";
+    elements.receiverToggle.className = "danger-button";
+  } else {
+    elements.receiverToggle.textContent = "Start receiver";
+    elements.receiverToggle.className = "primary-button";
+  }
+}
+
+function renderNetworkState() {
+  const discoveryEnabled = elements.settingsLanDiscovery.checked;
+  if (!discoveryEnabled) {
+    setPill(elements.networkBadge, "Offline", "idle");
+    elements.networkSummary.textContent = "LAN discovery is disabled.";
+    return;
+  }
+
+  setPill(elements.networkBadge, "Online", appState.devices.length ? "success" : "active");
+  elements.networkSummary.textContent = `${appState.devices.length} device${appState.devices.length === 1 ? "" : "s"} found on this network`;
+}
+
+function syncOverflowTitles() {
+  const textSelectors = [
+    "#send-target-name",
+    "#send-target-address",
+    "#send-target-message",
+    "#action-target-name",
+    "#package-root-name",
+    "#package-root-kind",
+    "#package-summary-message",
+    "#send-summary-file",
+    "#send-summary-meta",
+    "#send-summary-hash",
+    "#send-message",
+    "#receiver-bind",
+    "#receiver-message",
+    "#receiver-file",
+    "#receiver-saved-path",
+    "#receiver-certificate",
+    "#receiver-output-label",
+    "#device-detail-name",
+    "#device-detail-address",
+    "#device-detail-fingerprint",
+    "#device-detail-trust",
+    "#status-left",
+    "#status-center",
+    "#status-right",
+    "#network-summary",
+    ".device-name",
+    ".device-address",
+    ".received-item span",
+    ".trusted-item span",
+    "#transfers-table-body td",
+  ];
+
+  for (const selector of textSelectors) {
+    for (const node of document.querySelectorAll(selector)) {
+      const text = (node.textContent ?? "").trim();
+      if (text) {
+        node.title = text;
+      } else {
+        node.removeAttribute("title");
+      }
+    }
+  }
+
+  const inputSelectors = ["#source-path", "#receiver-output", "#settings-receive-folder", "#certificate-path"];
+  for (const selector of inputSelectors) {
+    const node = document.querySelector(selector);
+    if (!node) continue;
+    const value = (node.value ?? "").trim();
+    if (value) {
+      node.title = value;
+    } else {
+      node.removeAttribute("title");
+    }
+  }
+}
+
+function renderSettings() {
+  elements.settingsLanDiscovery.checked = true;
+  elements.settingsAutoTrust.checked = true;
+  elements.settingsBindAddress.value = "0.0.0.0:5000";
+  if (!elements.settingsDiscoveryTimeout.value) {
+    elements.settingsDiscoveryTimeout.value = "3";
+  }
+  if (!elements.settingsTheme.value) {
+    elements.settingsTheme.value = "System (placeholder)";
+  }
+  syncReceiveFolderDisplays(appState.receiveOutputLabel, appState.receiveOutputDir);
 }
 
 function updateStatusBar() {
-  elements.statusLeft.textContent = appState.currentView === "receive" ? appState.receiverMessage : appState.sendMessage;
-  elements.statusCenter.textContent = `Receiver ${labelForTransferState(appState.receiverState).toLowerCase()}`;
-  if (elements.manualMode.checked) {
-    elements.statusRight.textContent = elements.targetAddress.value.trim() || "Manual target";
-  } else {
-    elements.statusRight.textContent = selectedDevice()?.deviceName ?? "No target selected";
-  }
-  elements.sidebarReceiverState.textContent = labelForTransferState(appState.receiverState);
+  const activeProgress = [...appState.transfers].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  elements.statusLeft.textContent = `${appState.devices.length} device${appState.devices.length === 1 ? "" : "s"} on LAN`;
+  elements.statusCenter.textContent = appState.receiverActive
+    ? `Receiver listening on ${appState.receiverBindAddr}`
+    : "Receiver stopped";
+  elements.statusRight.textContent = activeProgress
+    ? `${activeProgress.status} • ${activeProgress.speed}`
+    : (elements.manualMode.checked ? (elements.targetAddress.value.trim() || "Manual target") : (selectedDevice()?.deviceName || "No target selected"));
 }
 
 function renderAll() {
@@ -509,28 +710,26 @@ function renderAll() {
   renderRecentReceived();
   renderTransfers();
   renderSettings();
+  renderNetworkState();
   setReceiverToggle();
   updateStatusBar();
+  syncOverflowTitles();
 }
-
-function renderSettings() {
-  elements.settingsLanDiscovery.checked = true;
-  elements.settingsAutoTrust.checked = true;
-  elements.settingsTheme.value = "System (placeholder)";
-  elements.settingsBindAddress.value = "0.0.0.0:5000";
-  if (!elements.settingsDiscoveryTimeout.value) {
-    elements.settingsDiscoveryTimeout.value = "3";
-  }
-  syncReceiveFolderDisplays(appState.receiveOutputLabel, appState.receiveOutputDir);
-}
-
 async function refreshDevices() {
   const timeout = Number(elements.settingsDiscoveryTimeout.value || 3);
+  const discoveryEnabled = elements.settingsLanDiscovery.checked;
   elements.globalRefresh.disabled = true;
   elements.refreshDevicesSend.disabled = true;
   elements.refreshDevicesView.disabled = true;
   try {
+    if (!discoveryEnabled) {
+      appState.devices = [];
+      appState.selectedPeerId = null;
+      renderAll();
+      return;
+    }
     appState.devices = await invoke("discover_nearby_receivers", { timeoutSecs: timeout });
+    selectDefaultDevice();
     renderAll();
   } catch (error) {
     appState.devices = [];
@@ -548,7 +747,7 @@ async function browseReceiveOutput() {
   try {
     const selected = await invoke("pick_receive_folder");
     if (selected) {
-      syncReceiveFolderDisplays(selected, selected);
+      syncReceiveFolderDisplays(simplifiedPathLabel(selected), selected);
       renderAll();
     }
   } catch (error) {
@@ -581,7 +780,7 @@ async function stopReceiver() {
     await invoke("stop_receiver");
     appState.receiverState = "stopping";
     appState.receiverMessage = "Stopping receiver...";
-    updateStatusBar();
+    renderAll();
   } catch (error) {
     applyReceiverStatus({ state: "error", message: `${error}` });
   }
@@ -597,17 +796,17 @@ async function toggleReceiver() {
 
 async function startSend() {
   if (!elements.sourcePath.value) {
-    applySendStatus({ state: "error", message: "Choose a source file or folder before sending." });
+    applySendStatus({ state: "error", message: "Choose a file or folder before sending." });
     return;
   }
 
   if (elements.manualMode.checked) {
     if (!elements.targetAddress.value.trim() || !elements.certificatePath.value) {
-      applySendStatus({ state: "error", message: "Manual target mode requires both a receiver address and a receiver certificate." });
+      applySendStatus({ state: "error", message: "Manual mode requires both a receiver address and a receiver certificate." });
       return;
     }
   } else if (!appState.selectedPeerId) {
-    applySendStatus({ state: "error", message: "Select a nearby receiver or enable manual target mode." });
+    applySendStatus({ state: "error", message: "Select a nearby receiver or enable manual mode." });
     return;
   }
 
@@ -623,67 +822,85 @@ async function startSend() {
         parallelism: Number(elements.parallelism.value || 4),
       },
     });
+
     applySendStatus({
       state: "starting",
       message: elements.manualMode.checked
-        ? `Connecting to ${elements.targetAddress.value.trim()} using manual target mode...`
+        ? `Connecting to ${elements.targetAddress.value.trim()}...`
         : `Connecting to ${selectedDevice()?.deviceName ?? "selected receiver"}...`,
     });
+    switchView("send");
   } catch (error) {
     applySendStatus({ state: "error", message: `${error}` });
   }
 }
 
-function applyProgress(bar, text, speed, progress) {
+function applyProgress(bar, textNode, speedNode, progress) {
   const percent = Number(progress?.percent ?? 0);
   bar.style.width = `${percent}%`;
-  text.textContent = `${percent.toFixed(1)}%`;
-  speed.textContent = `${Number(progress?.averageMibPerSec ?? 0).toFixed(2)} MiB/s`;
+  textNode.textContent = `${percent.toFixed(1)}%`;
+  speedNode.textContent = `${Number(progress?.averageMibPerSec ?? 0).toFixed(2)} MiB/s`;
 }
 
 function applySendStatus(payload) {
   const state = payload.state ?? "idle";
-  appState.sendBusy = state === "starting" || state === "sending";
+  appState.sendBusy = ["starting", "sending"].includes(state);
   appState.sendMessage = payload.message ?? "Ready.";
+
   elements.sendButton.disabled = appState.sendBusy;
   elements.sendMessage.textContent = appState.sendMessage;
-  setBadge(elements.sendBadge, labelForTransferState(state), kindForTransferState(state));
+  setPill(elements.sendBadge, stateLabel(state), stateKind(state));
 
   if (payload.progress) {
     applyProgress(elements.sendProgressBar, elements.sendProgressText, elements.sendSpeed, payload.progress);
+    elements.sendSummaryFile.textContent = appState.sourceSummary?.rootName ?? basename(elements.sourcePath.value) ?? "Outgoing package";
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} • ${selectedDevice()?.deviceName ?? (elements.targetAddress.value.trim() || "Manual target")}`;
     elements.sendSummaryBytes.textContent = `${formatBytes(payload.progress.transferredBytes)} / ${formatBytes(payload.progress.totalBytes)}`;
     elements.sendSummaryChunks.textContent = `${payload.progress.completedFiles} / ${payload.progress.totalFiles}`;
-    elements.sendSummaryHash.textContent = payload.progress.currentPath || "In progress";
+    elements.sendSummaryHash.textContent = payload.progress.currentPath || "Preparing files";
   }
 
   if (payload.summary) {
     elements.sendSummaryFile.textContent = payload.summary.fileName;
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.summary.bytesTransferred)} • ${payload.summary.elapsedSecs.toFixed(1)}s`;
     elements.sendSummaryBytes.textContent = formatBytes(payload.summary.bytesTransferred);
-    elements.sendSummaryChunks.textContent = String(payload.summary.completedFiles);
+    elements.sendSummaryChunks.textContent = `${payload.summary.completedFiles} file${payload.summary.completedFiles === 1 ? "" : "s"}`;
     elements.sendSummaryHash.textContent = payload.summary.integrityVerified ? "Verified" : payload.summary.sha256Hex;
+    if (state === "completed") {
+      elements.sendProgressBar.style.width = "100%";
+      elements.sendProgressText.textContent = "100.0%";
+      elements.sendSpeed.textContent = `${Number(payload.summary.averageMibPerSec ?? 0).toFixed(2)} MiB/s`;
+    }
   }
 
   const transferName = appState.sourceSummary?.rootName || basename(elements.sourcePath.value) || "Outgoing package";
+  const transferKind = appState.sourceSummary ? packageKindLabel(appState.sourceSummary.rootKind) : "Package";
   const destination = elements.manualMode.checked
     ? elements.targetAddress.value.trim() || "Manual target"
     : selectedDevice()?.deviceName || "Nearby device";
 
   if (["starting", "sending", "completed", "error"].includes(state)) {
-    const id = ensureTransfer("currentSendTransferId", "Send", transferName, destination);
+    const id = ensureTransfer("currentSendTransferId", "Send", transferKind, transferName, destination);
     updateTransfer(id, {
       name: transferName,
+      kind: transferKind,
       destination,
-      status: labelForTransferState(state),
+      status: stateLabel(state),
       progress: payload.progress ? `${Number(payload.progress.percent ?? 0).toFixed(1)}%` : state === "completed" ? "100%" : "0%",
-      speed: payload.progress ? `${Number(payload.progress.averageMibPerSec ?? 0).toFixed(2)} MiB/s` : state === "completed" && payload.summary ? `${Number(payload.summary.averageMibPerSec ?? 0).toFixed(2)} MiB/s` : "0.00 MiB/s",
+      speed: payload.progress
+        ? `${Number(payload.progress.averageMibPerSec ?? 0).toFixed(2)} MiB/s`
+        : payload.summary
+          ? `${Number(payload.summary.averageMibPerSec ?? 0).toFixed(2)} MiB/s`
+          : "0.00 MiB/s",
     });
-    if (state === "completed" || state === "error") {
+    if (["completed", "error"].includes(state)) {
       appState.currentSendTransferId = null;
     }
   }
 
   renderTransfers();
   updateStatusBar();
+  syncOverflowTitles();
 }
 
 function applyReceiverStatus(payload) {
@@ -692,56 +909,72 @@ function applyReceiverStatus(payload) {
   appState.receiverActive = ["starting", "listening", "receiving"].includes(state);
   appState.receiverMessage = payload.message ?? "Receiver stopped.";
   elements.receiverMessage.textContent = appState.receiverMessage;
-  setBadge(elements.receiverBadge, labelForTransferState(state), kindForTransferState(state));
-  setReceiverToggle();
+  setPill(elements.receiverBadge, stateLabel(state), stateKind(state));
 
   if (payload.outputDirLabel || payload.outputDir) {
     syncReceiveFolderDisplays(payload.outputDirLabel ?? payload.outputDir, payload.outputDir ?? appState.receiveOutputDir);
   }
-  if (payload.bindAddr) elements.receiverBind.textContent = payload.bindAddr;
-  if (payload.savedPathLabel || payload.savedPath) {
-    elements.receiverSavedPath.textContent = payload.savedPathLabel ?? payload.savedPath;
+  if (payload.bindAddr) {
+    appState.receiverBindAddr = payload.bindAddr;
+  } else if (!appState.receiverActive && ["idle", "stopped", "error"].includes(state)) {
+    appState.receiverBindAddr = "Not listening";
   }
+  elements.receiverBind.textContent = appState.receiverBindAddr;
+
   if (payload.certificatePath) {
-    elements.receiverCertificate.textContent = basename(payload.certificatePath);
+    appState.receiverCertificateName = basename(payload.certificatePath);
   }
+  elements.receiverCertificate.textContent = appState.receiverCertificateName;
+
+  if (payload.savedPathLabel || payload.savedPath) {
+    elements.receiverSavedPath.textContent = payload.savedPathLabel ?? simplifiedPathLabel(payload.savedPath);
+  }
+
   if (payload.progress) {
     applyProgress(elements.receiverProgressBar, elements.receiverProgressText, elements.receiverSpeed, payload.progress);
     elements.receiverFile.textContent = payload.progress.currentPath || "Incoming file";
+    const destination = payload.outputDirLabel ?? payload.outputDir ?? appState.receiveOutputLabel;
     const id = ensureTransfer(
       "currentReceiveTransferId",
       "Receive",
+      "Incoming",
       payload.progress.currentPath || "Incoming transfer",
-      payload.outputDirLabel ?? payload.outputDir ?? appState.receiveOutputLabel,
+      destination,
     );
     updateTransfer(id, {
       name: payload.progress.currentPath || "Incoming transfer",
-      destination: payload.outputDirLabel ?? payload.outputDir ?? appState.receiveOutputLabel,
-      status: labelForTransferState(state),
+      kind: "Incoming",
+      destination,
+      status: stateLabel(state),
       progress: `${Number(payload.progress.percent ?? 0).toFixed(1)}%`,
       speed: `${Number(payload.progress.averageMibPerSec ?? 0).toFixed(2)} MiB/s`,
     });
   }
 
   if (payload.summary) {
-    elements.receiverFile.textContent = payload.summary.fileName;
     const destination = payload.savedPathLabel ?? payload.savedPath ?? appState.receiveOutputLabel;
-    const id = ensureTransfer("currentReceiveTransferId", "Receive", payload.summary.fileName, destination);
+    const fileName = payload.summary.fileName;
+    elements.receiverFile.textContent = fileName;
+    elements.receiverSavedPath.textContent = destination;
+    const id = ensureTransfer("currentReceiveTransferId", "Receive", "Received", fileName, destination);
     updateTransfer(id, {
-      name: payload.summary.fileName,
+      name: fileName,
+      kind: "Received",
       destination,
-      status: labelForTransferState(state),
-      progress: state === "completed" ? "100%" : "Error",
+      status: stateLabel(state),
+      progress: state === "completed" ? "100%" : "Failed",
       speed: `${Number(payload.summary.averageMibPerSec ?? 0).toFixed(2)} MiB/s`,
     });
     appState.currentReceiveTransferId = null;
 
     if (state === "completed") {
+      elements.receiverProgressBar.style.width = "100%";
+      elements.receiverProgressText.textContent = "100.0%";
+      elements.receiverSpeed.textContent = `${Number(payload.summary.averageMibPerSec ?? 0).toFixed(2)} MiB/s`;
       appState.recentReceived.unshift({
-        name: payload.summary.fileName,
+        name: fileName,
+        when: formatTime(Date.now()),
         path: destination,
-        remote: payload.remoteAddress ?? "Unknown sender",
-        timestamp: Date.now(),
       });
       appState.recentReceived = appState.recentReceived.slice(0, 8);
     }
@@ -754,11 +987,21 @@ function applyReceiverStatus(payload) {
       speed: "0.00 MiB/s",
     });
     appState.currentReceiveTransferId = null;
+    appState.receiverActive = false;
   }
 
+  if (["stopped", "idle"].includes(state)) {
+    appState.receiverActive = false;
+    elements.receiverProgressBar.style.width = "0%";
+    elements.receiverProgressText.textContent = "0%";
+    elements.receiverSpeed.textContent = "0.00 MiB/s";
+  }
+
+  setReceiverToggle();
   renderRecentReceived();
   renderTransfers();
   updateStatusBar();
+  syncOverflowTitles();
 }
 
 function wireEvents() {
@@ -769,15 +1012,29 @@ function wireEvents() {
   elements.globalRefresh.addEventListener("click", refreshDevices);
   elements.refreshDevicesSend.addEventListener("click", refreshDevices);
   elements.refreshDevicesView.addEventListener("click", refreshDevices);
+  elements.newTransfer.addEventListener("click", () => switchView("send"));
+
+  elements.deviceSearch.addEventListener("input", () => {
+    appState.deviceSearch = elements.deviceSearch.value;
+    renderDeviceLists();
+  });
 
   elements.pickSourceFile.addEventListener("click", async () => {
     const selected = await invoke("pick_source_file");
-    if (selected) await setSourcePath(selected);
+    if (selected) {
+      await setSourcePath(selected);
+      switchView("send");
+    }
   });
+
   elements.pickSourceFolder.addEventListener("click", async () => {
     const selected = await invoke("pick_source_folder");
-    if (selected) await setSourcePath(selected);
+    if (selected) {
+      await setSourcePath(selected);
+      switchView("send");
+    }
   });
+
   elements.pickCertificate.addEventListener("click", async () => {
     const selected = await invoke("pick_certificate_file");
     if (selected) {
@@ -797,6 +1054,7 @@ function wireEvents() {
   elements.receiverToggle.addEventListener("click", toggleReceiver);
   elements.browseOutput.addEventListener("click", browseReceiveOutput);
   elements.settingsBrowseOutput.addEventListener("click", browseReceiveOutput);
+  elements.settingsLanDiscovery.addEventListener("change", refreshDevices);
 }
 
 async function bootstrap() {
@@ -813,3 +1071,4 @@ bootstrap().catch((error) => {
   applySendStatus({ state: "error", message: `App bootstrap failed: ${error}` });
   applyReceiverStatus({ state: "error", message: `App bootstrap failed: ${error}` });
 });
+
