@@ -1202,3 +1202,57 @@ tbody td {
     width: 100%;
   }
 }
+
+/* UI cleanup overrides for desktop utility layout */
+.settings-form label.toggle-row,
+.advanced-body .toggle-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.settings-form label.toggle-row span,
+.advanced-body .toggle-row span {
+  margin: 0;
+}
+
+.inline-field {
+  flex-wrap: nowrap;
+  align-items: stretch;
+}
+
+.inline-field input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.inline-field button {
+  flex: 0 0 auto;
+  align-self: stretch;
+}
+
+.device-main {
+  align-items: flex-start;
+}
+
+.device-icon {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.device-list-card > .pill,
+.device-grid-top > .pill {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 820px) {
+  .inline-field {
+    flex-wrap: wrap;
+  }
+
+  .inline-field button {
+    align-self: auto;
+  }
+}

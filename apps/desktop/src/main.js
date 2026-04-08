@@ -199,9 +199,9 @@ function inferDeviceType(device) {
 
 function deviceGlyph(device) {
   const type = inferDeviceType(device);
-  if (type === "phone") return "Phone";
-  if (type === "desktop") return "Desktop";
-  return "Laptop";
+  if (type === "phone") return "PH";
+  if (type === "desktop") return "PC";
+  return "LT";
 }
 
 function setPill(node, label, kind = "idle") {
@@ -1071,4 +1071,5 @@ bootstrap().catch((error) => {
   applySendStatus({ state: "error", message: `App bootstrap failed: ${error}` });
   applyReceiverStatus({ state: "error", message: `App bootstrap failed: ${error}` });
 });
+
 
