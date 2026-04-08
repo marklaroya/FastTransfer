@@ -8,9 +8,9 @@ use std::{
 };
 
 use integrity::{format_sha256, Sha256Hash, SHA256_LEN};
-use protocol::{TransferManifest, TransferSession};
+use protocol::{PackageItemKind, TransferManifest, TransferSession};
 
-const CHECKPOINT_VERSION: &str = "1";
+const CHECKPOINT_VERSION: &str = "2";
 
 /// Tracks completed chunks for a resumable transfer session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,33 +50,45 @@ impl ResumeState {
 /// Metadata that must stay stable across resumed transfers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeMetadata {
-    /// File name for the transfer.
-    pub file_name: String,
-    /// Total file size in bytes.
-    pub file_size: u64,
+    /// Package root name for the transfer.
+    pub root_name: String,
+    /// Whether the selected root was a file or directory.
+    pub root_kind: PackageItemKind,
+    /// Total package size in bytes.
+    pub total_bytes: u64,
     /// Configured chunk size in bytes.
     pub chunk_size: u32,
     /// Total number of chunks in the transfer.
     pub chunk_count: u64,
-    /// Expected SHA-256 of the full file.
-    pub file_sha256: Sha256Hash,
+    /// Total number of files in the package.
+    pub files_count: u64,
+    /// Total number of directories in the package.
+    pub directories_count: u64,
+    /// Stable fingerprint of the manifest contents.
+    pub manifest_sha256: Sha256Hash,
 }
 
 impl ResumeMetadata {
     /// Builds stable resume metadata from a transfer manifest.
-    pub fn from_manifest(manifest: &TransferManifest) -> Self {
-        Self {
-            file_name: manifest.file_name.clone(),
-            file_size: manifest.file_size,
+    pub fn from_manifest(manifest: &TransferManifest) -> io::Result<Self> {
+        let manifest_sha256 = manifest
+            .fingerprint()
+            .map_err(|error| invalid_data(format!("failed to fingerprint manifest: {error}")))?;
+        Ok(Self {
+            root_name: manifest.root_name.clone(),
+            root_kind: manifest.root_kind,
+            total_bytes: manifest.total_bytes,
             chunk_size: manifest.chunk_size,
             chunk_count: manifest.chunk_count,
-            file_sha256: manifest.file_sha256,
-        }
+            files_count: manifest.files_count,
+            directories_count: manifest.directories_count,
+            manifest_sha256,
+        })
     }
 
     fn checkpoint_file_name(&self) -> String {
-        let file_name_hex = encode_hex(self.file_name.as_bytes());
-        format!("{file_name_hex}.ftresume")
+        let root_name_hex = encode_hex(self.root_name.as_bytes());
+        format!("{root_name_hex}-{}.ftresume", format_sha256(&self.manifest_sha256))
     }
 }
 
@@ -93,7 +105,7 @@ pub struct PersistentResumeState {
 impl PersistentResumeState {
     /// Loads an existing checkpoint or creates an empty one under the given base directory.
     pub fn load_or_create_in(base_dir: &Path, manifest: &TransferManifest) -> io::Result<Self> {
-        let metadata = ResumeMetadata::from_manifest(manifest);
+        let metadata = ResumeMetadata::from_manifest(manifest)?;
         let checkpoint_dir = checkpoint_dir(base_dir);
         fs::create_dir_all(&checkpoint_dir)?;
         let path = checkpoint_dir.join(metadata.checkpoint_file_name());
@@ -182,11 +194,14 @@ impl PersistentResumeState {
     fn load_from_path(path: &Path) -> io::Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut version = None;
-        let mut file_name = None;
-        let mut file_size = None;
+        let mut root_name = None;
+        let mut root_kind = None;
+        let mut total_bytes = None;
         let mut chunk_size = None;
         let mut chunk_count = None;
-        let mut file_sha256 = None;
+        let mut files_count = None;
+        let mut directories_count = None;
+        let mut manifest_sha256 = None;
         let mut completed_chunks = BTreeSet::new();
 
         for line in content.lines() {
@@ -196,16 +211,25 @@ impl PersistentResumeState {
 
             match key {
                 "version" => version = Some(value.to_owned()),
-                "file_name_hex" => {
+                "root_name_hex" => {
                     let bytes = decode_hex(value)?;
                     let decoded = String::from_utf8(bytes)
-                        .map_err(|_| invalid_data("checkpoint file name was not valid UTF-8"))?;
-                    file_name = Some(decoded);
+                        .map_err(|_| invalid_data("checkpoint root name was not valid UTF-8"))?;
+                    root_name = Some(decoded);
                 }
-                "file_size" => file_size = Some(parse_u64(value, "file_size")?),
+                "root_kind" => {
+                    root_kind = Some(match value {
+                        "file" => PackageItemKind::File,
+                        "directory" => PackageItemKind::Directory,
+                        _ => return Err(invalid_data("invalid checkpoint root kind")),
+                    })
+                }
+                "total_bytes" => total_bytes = Some(parse_u64(value, "total_bytes")?),
                 "chunk_size" => chunk_size = Some(parse_u32(value, "chunk_size")?),
                 "chunk_count" => chunk_count = Some(parse_u64(value, "chunk_count")?),
-                "file_sha256" => file_sha256 = Some(parse_sha256(value)?),
+                "files_count" => files_count = Some(parse_u64(value, "files_count")?),
+                "directories_count" => directories_count = Some(parse_u64(value, "directories_count")?),
+                "manifest_sha256" => manifest_sha256 = Some(parse_sha256(value)?),
                 "completed" => {
                     if !value.is_empty() {
                         for item in value.split(',') {
@@ -223,11 +247,14 @@ impl PersistentResumeState {
 
         Ok(Self {
             metadata: ResumeMetadata {
-                file_name: file_name.ok_or_else(|| invalid_data("missing checkpoint file name"))?,
-                file_size: file_size.ok_or_else(|| invalid_data("missing checkpoint file size"))?,
+                root_name: root_name.ok_or_else(|| invalid_data("missing checkpoint root name"))?,
+                root_kind: root_kind.ok_or_else(|| invalid_data("missing checkpoint root kind"))?,
+                total_bytes: total_bytes.ok_or_else(|| invalid_data("missing checkpoint total bytes"))?,
                 chunk_size: chunk_size.ok_or_else(|| invalid_data("missing checkpoint chunk size"))?,
                 chunk_count: chunk_count.ok_or_else(|| invalid_data("missing checkpoint chunk count"))?,
-                file_sha256: file_sha256.ok_or_else(|| invalid_data("missing checkpoint file SHA-256"))?,
+                files_count: files_count.ok_or_else(|| invalid_data("missing checkpoint files count"))?,
+                directories_count: directories_count.ok_or_else(|| invalid_data("missing checkpoint directories count"))?,
+                manifest_sha256: manifest_sha256.ok_or_else(|| invalid_data("missing checkpoint manifest SHA-256"))?,
             },
             completed_chunks,
             path: path.to_path_buf(),
@@ -242,14 +269,21 @@ impl PersistentResumeState {
             .map(u64::to_string)
             .collect::<Vec<_>>()
             .join(",");
+        let root_kind = match self.metadata.root_kind {
+            PackageItemKind::File => "file",
+            PackageItemKind::Directory => "directory",
+        };
         let content = format!(
-            "version={version}\nfile_name_hex={file_name_hex}\nfile_size={file_size}\nchunk_size={chunk_size}\nchunk_count={chunk_count}\nfile_sha256={file_sha256}\ncompleted={completed}\n",
+            "version={version}\nroot_name_hex={root_name_hex}\nroot_kind={root_kind}\ntotal_bytes={total_bytes}\nchunk_size={chunk_size}\nchunk_count={chunk_count}\nfiles_count={files_count}\ndirectories_count={directories_count}\nmanifest_sha256={manifest_sha256}\ncompleted={completed}\n",
             version = CHECKPOINT_VERSION,
-            file_name_hex = encode_hex(self.metadata.file_name.as_bytes()),
-            file_size = self.metadata.file_size,
+            root_name_hex = encode_hex(self.metadata.root_name.as_bytes()),
+            root_kind = root_kind,
+            total_bytes = self.metadata.total_bytes,
             chunk_size = self.metadata.chunk_size,
             chunk_count = self.metadata.chunk_count,
-            file_sha256 = format_sha256(&self.metadata.file_sha256),
+            files_count = self.metadata.files_count,
+            directories_count = self.metadata.directories_count,
+            manifest_sha256 = format_sha256(&self.metadata.manifest_sha256),
             completed = completed,
         );
         fs::write(&self.path, content)
@@ -325,10 +359,13 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use integrity::sha256_bytes;
-    use protocol::TransferManifest;
+    use protocol::{PackageEntry, PackageItemKind, TransferManifest};
 
     use super::PersistentResumeState;
 
@@ -344,11 +381,31 @@ mod tests {
         fs::create_dir_all(&temp_root).expect("temp directory should be created");
 
         let manifest = TransferManifest {
-            file_name: "example.bin".to_owned(),
-            file_size: 12_345,
+            root_name: "example".to_owned(),
+            root_kind: PackageItemKind::Directory,
+            total_bytes: 12_345,
             chunk_size: 4_096,
             chunk_count: 4,
-            file_sha256: sha256_bytes(b"example"),
+            files_count: 1,
+            directories_count: 1,
+            entries: vec![
+                PackageEntry {
+                    relative_path: "empty".to_owned(),
+                    item_kind: PackageItemKind::Directory,
+                    file_size: 0,
+                    file_sha256: [0_u8; 32],
+                    first_chunk_index: 0,
+                    chunk_count: 0,
+                },
+                PackageEntry {
+                    relative_path: "file.bin".to_owned(),
+                    item_kind: PackageItemKind::File,
+                    file_size: 12_345,
+                    file_sha256: sha256_bytes(b"example"),
+                    first_chunk_index: 0,
+                    chunk_count: 4,
+                },
+            ],
         };
 
         let mut state = PersistentResumeState::load_or_create_in(&temp_root, &manifest)

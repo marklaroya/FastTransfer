@@ -1,4 +1,4 @@
-//! Terminal progress reporting helpers for streaming transfers.
+﻿//! Terminal progress reporting helpers for streaming transfers.
 
 use std::{
     io::{self, Write},
@@ -22,6 +22,12 @@ pub struct ProgressUpdate {
     pub percent_complete: f64,
     /// Average transfer speed in mebibytes per second.
     pub average_mib_per_sec: f64,
+    /// Number of files completed so far.
+    pub completed_files: u64,
+    /// Total number of files in the package.
+    pub total_files: u64,
+    /// Current relative file path being processed, when available.
+    pub current_path: Option<String>,
     /// Whether this is the terminal completion update.
     pub completed: bool,
 }
@@ -42,6 +48,9 @@ pub struct ProgressReporter {
     label: String,
     total_bytes: u64,
     transferred_bytes: u64,
+    total_files: u64,
+    completed_files: u64,
+    current_path: Option<String>,
     started_at: Instant,
     last_rendered_at: Instant,
     render_terminal: bool,
@@ -50,12 +59,15 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     /// Creates a new progress reporter with a human-readable label.
-    pub fn new(label: impl Into<String>, total_bytes: u64) -> Self {
+    pub fn new(label: impl Into<String>, total_bytes: u64, total_files: u64) -> Self {
         let now = Instant::now();
         Self {
             label: label.into(),
             total_bytes,
             transferred_bytes: 0,
+            total_files,
+            completed_files: 0,
+            current_path: None,
             started_at: now,
             last_rendered_at: now,
             render_terminal: true,
@@ -75,6 +87,18 @@ impl ProgressReporter {
         self
     }
 
+    /// Updates the current file path and label context.
+    pub fn set_current_path(&mut self, path: Option<String>) {
+        self.current_path = path;
+        self.emit(false);
+    }
+
+    /// Updates the number of completed files.
+    pub fn set_completed_files(&mut self, completed_files: u64) {
+        self.completed_files = completed_files.min(self.total_files);
+        self.emit(false);
+    }
+
     /// Records additional transferred bytes and updates the terminal periodically.
     pub fn advance(&mut self, delta: u64) {
         self.transferred_bytes = self.transferred_bytes.saturating_add(delta);
@@ -90,6 +114,7 @@ impl ProgressReporter {
 
     /// Renders a final line and returns the summary snapshot.
     pub fn finish(&mut self) -> ProgressSnapshot {
+        self.completed_files = self.total_files;
         if self.render_terminal {
             self.render(true);
             println!();
@@ -113,6 +138,9 @@ impl ProgressReporter {
                 transferred_bytes: self.transferred_bytes,
                 percent_complete: percent_complete(self.transferred_bytes, self.total_bytes),
                 average_mib_per_sec: mib_per_sec(self.transferred_bytes, self.started_at.elapsed()),
+                completed_files: self.completed_files,
+                total_files: self.total_files,
+                current_path: self.current_path.clone(),
                 completed,
             });
         }
@@ -126,8 +154,17 @@ impl ProgressReporter {
         let percent = percent_complete(self.transferred_bytes, self.total_bytes);
         let elapsed = self.started_at.elapsed();
         let speed = mib_per_sec(self.transferred_bytes, elapsed);
+        let current_path = self.current_path.as_deref().unwrap_or("preparing package");
 
-        print!("\r{}: {:>6.2}% at {:>8.2} MiB/s", self.label, percent, speed,);
+        print!(
+            "\r{}: {:>6.2}% at {:>8.2} MiB/s [{} / {} files] {}",
+            self.label,
+            percent,
+            speed,
+            self.completed_files,
+            self.total_files,
+            current_path,
+        );
         let _ = io::stdout().flush();
         self.last_rendered_at = Instant::now();
     }

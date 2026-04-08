@@ -1,11 +1,12 @@
-﻿//! Shared protocol primitives used across the FastTransfer engine.
+//! Shared protocol primitives used across the FastTransfer engine.
 
 use std::fmt;
 
-use integrity::{Sha256Hash, SHA256_LEN};
+use integrity::{sha256_bytes, Sha256Hash, SHA256_LEN};
+use serde::{Deserialize, Serialize};
 
 /// Current protocol version for wire compatibility checks.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Magic bytes used to frame a transfer manifest on the control stream.
 pub const TRANSFER_MANIFEST_MAGIC: [u8; 4] = *b"FTM1";
@@ -22,11 +23,11 @@ pub const CHUNK_ACK_MAGIC: [u8; 4] = *b"FTA1";
 /// Magic bytes used to signal transfer completion.
 pub const TRANSFER_STATUS_MAGIC: [u8; 4] = *b"FTS1";
 
-/// Size of the fixed-length transfer-manifest preamble.
-pub const TRANSFER_MANIFEST_PREAMBLE_LEN: usize = 58;
+/// Size of the fixed-length transfer-manifest header.
+pub const TRANSFER_MANIFEST_HEADER_LEN: usize = 6;
 
 /// Size of the fixed-length chunk-stream preamble.
-pub const CHUNK_STREAM_PREAMBLE_LEN: usize = 56;
+pub const CHUNK_STREAM_PREAMBLE_LEN: usize = 60;
 
 /// Size of the fixed-length resume-plan preamble.
 pub const RESUME_PLAN_PREAMBLE_LEN: usize = 12;
@@ -51,9 +52,9 @@ pub enum TransferMode {
 pub struct TransferSession {
     /// Stable session identifier.
     pub id: String,
-    /// Human-readable file name.
+    /// Human-readable package root name.
     pub file_name: String,
-    /// Total file size in bytes.
+    /// Total package size in bytes.
     pub total_bytes: u64,
     /// Planned chunk size in bytes.
     pub chunk_size: u32,
@@ -62,7 +63,7 @@ pub struct TransferSession {
 }
 
 impl TransferSession {
-    /// Returns the number of chunks needed to transfer the file.
+    /// Returns the number of chunks needed to transfer the session payload.
     pub fn chunk_count(&self) -> u64 {
         if self.total_bytes == 0 {
             return 0;
@@ -73,12 +74,34 @@ impl TransferSession {
     }
 }
 
+/// Type of item described by a package manifest entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageItemKind {
+    /// A regular file whose contents must be transferred.
+    File,
+    /// A directory entry that should exist on the receiver.
+    Directory,
+}
+
+impl PackageItemKind {
+    /// Returns `true` when this entry refers to a regular file.
+    pub fn is_file(self) -> bool {
+        matches!(self, Self::File)
+    }
+
+    /// Returns `true` when this entry refers to a directory.
+    pub fn is_directory(self) -> bool {
+        matches!(self, Self::Directory)
+    }
+}
+
 /// Metadata describing a discrete file chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkDescriptor {
-    /// Zero-based chunk index.
+    /// Zero-based global chunk index within the package.
     pub index: u64,
-    /// Byte offset within the file.
+    /// Byte offset within the source file.
     pub offset: u64,
     /// Chunk payload size in bytes.
     pub size: u32,
@@ -87,7 +110,9 @@ pub struct ChunkDescriptor {
 /// Header sent before a chunk payload begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkStreamHeader {
-    /// Planned chunk location within the file.
+    /// Package entry index for the target file.
+    pub file_index: u32,
+    /// Planned chunk location within the package and file.
     pub descriptor: ChunkDescriptor,
     /// Expected SHA-256 of the chunk payload.
     pub chunk_sha256: Sha256Hash,
@@ -98,6 +123,7 @@ impl ChunkStreamHeader {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(CHUNK_STREAM_PREAMBLE_LEN);
         bytes.extend_from_slice(&CHUNK_STREAM_MAGIC);
+        bytes.extend_from_slice(&self.file_index.to_le_bytes());
         bytes.extend_from_slice(&self.descriptor.index.to_le_bytes());
         bytes.extend_from_slice(&self.descriptor.offset.to_le_bytes());
         bytes.extend_from_slice(&self.descriptor.size.to_le_bytes());
@@ -111,14 +137,17 @@ impl ChunkStreamHeader {
             return Err(ProtocolError::InvalidMagic);
         }
 
+        let mut file_index_bytes = [0_u8; 4];
+        file_index_bytes.copy_from_slice(&preamble[4..8]);
+
         let mut index_bytes = [0_u8; 8];
-        index_bytes.copy_from_slice(&preamble[4..12]);
+        index_bytes.copy_from_slice(&preamble[8..16]);
 
         let mut offset_bytes = [0_u8; 8];
-        offset_bytes.copy_from_slice(&preamble[12..20]);
+        offset_bytes.copy_from_slice(&preamble[16..24]);
 
         let mut size_bytes = [0_u8; 4];
-        size_bytes.copy_from_slice(&preamble[20..24]);
+        size_bytes.copy_from_slice(&preamble[24..28]);
 
         let size = u32::from_le_bytes(size_bytes);
         if size == 0 {
@@ -126,9 +155,10 @@ impl ChunkStreamHeader {
         }
 
         let mut chunk_sha256 = [0_u8; SHA256_LEN];
-        chunk_sha256.copy_from_slice(&preamble[24..56]);
+        chunk_sha256.copy_from_slice(&preamble[28..60]);
 
         Ok(Self {
+            file_index: u32::from_le_bytes(file_index_bytes),
             descriptor: ChunkDescriptor {
                 index: u64::from_le_bytes(index_bytes),
                 offset: u64::from_le_bytes(offset_bytes),
@@ -139,111 +169,205 @@ impl ChunkStreamHeader {
     }
 }
 
-/// Metadata sent once before chunk streams begin.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransferManifest {
-    /// File name that the receiver should persist.
-    pub file_name: String,
-    /// Total number of bytes that will be streamed.
+/// Metadata for a single package item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageEntry {
+    /// Path relative to the selected source root.
+    pub relative_path: String,
+    /// Item kind.
+    pub item_kind: PackageItemKind,
+    /// File size in bytes, or zero for directories.
     pub file_size: u64,
+    /// Expected SHA-256 of the file contents, or all zeros for directories.
+    pub file_sha256: Sha256Hash,
+    /// First global chunk index assigned to this file.
+    pub first_chunk_index: u64,
+    /// Number of chunks assigned to this file.
+    pub chunk_count: u64,
+}
+
+impl PackageEntry {
+    /// Returns `true` if the entry represents a regular file.
+    pub fn is_file(&self) -> bool {
+        self.item_kind.is_file()
+    }
+
+    /// Returns `true` if the entry represents a directory.
+    pub fn is_directory(&self) -> bool {
+        self.item_kind.is_directory()
+    }
+
+    /// Returns `true` if the entry has no payload chunks.
+    pub fn is_empty_file(&self) -> bool {
+        self.is_file() && self.file_size == 0 && self.chunk_count == 0
+    }
+
+    /// Returns `true` if the given global chunk index belongs to this entry.
+    pub fn contains_chunk(&self, chunk_index: u64) -> bool {
+        self.is_file()
+            && chunk_index >= self.first_chunk_index
+            && chunk_index < self.first_chunk_index.saturating_add(self.chunk_count)
+    }
+}
+
+/// Metadata sent once before chunk streams begin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferManifest {
+    /// Human-readable selected root name.
+    pub root_name: String,
+    /// Whether the selected root is a file or directory.
+    pub root_kind: PackageItemKind,
+    /// Total number of bytes transferred across all files.
+    pub total_bytes: u64,
     /// Chunk size selected by the sender.
     pub chunk_size: u32,
-    /// Total number of chunks expected for the transfer.
+    /// Total number of chunks expected across the package.
     pub chunk_count: u64,
-    /// Expected SHA-256 of the full source file.
-    pub file_sha256: Sha256Hash,
+    /// Number of files in the package.
+    pub files_count: u64,
+    /// Number of directories in the package.
+    pub directories_count: u64,
+    /// File and directory entries in relative-path order.
+    pub entries: Vec<PackageEntry>,
 }
 
 impl TransferManifest {
-    /// Encodes the transfer manifest into a compact binary representation.
+    /// Encodes the transfer manifest into a binary representation.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        let name_bytes = self.file_name.as_bytes();
-        let name_len = u16::try_from(name_bytes.len())
-            .map_err(|_| ProtocolError::FileNameTooLong(name_bytes.len()))?;
+        self.validate()?;
 
-        if name_len == 0 {
+        let payload = serde_json::to_vec(self).map_err(|error| ProtocolError::InvalidManifest(error.to_string()))?;
+        let mut bytes = Vec::with_capacity(TRANSFER_MANIFEST_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&TRANSFER_MANIFEST_MAGIC);
+        bytes.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
+    }
+
+    /// Decodes a manifest from the full control-stream payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() < TRANSFER_MANIFEST_HEADER_LEN {
+            return Err(ProtocolError::InvalidManifest("manifest payload was truncated".to_owned()));
+        }
+        if bytes[..4] != TRANSFER_MANIFEST_MAGIC {
+            return Err(ProtocolError::InvalidMagic);
+        }
+
+        let mut version_bytes = [0_u8; 2];
+        version_bytes.copy_from_slice(&bytes[4..6]);
+        let version = u16::from_le_bytes(version_bytes);
+        if version != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedProtocolVersion(version));
+        }
+
+        let manifest: Self = serde_json::from_slice(&bytes[6..])
+            .map_err(|error| ProtocolError::InvalidManifest(error.to_string()))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Computes a stable SHA-256 fingerprint for the manifest contents.
+    pub fn fingerprint(&self) -> Result<Sha256Hash, ProtocolError> {
+        Ok(sha256_bytes(&self.encode()?))
+    }
+
+    /// Returns the package entries that represent regular files.
+    pub fn file_entries(&self) -> impl Iterator<Item = (usize, &PackageEntry)> {
+        self.entries.iter().enumerate().filter(|(_, entry)| entry.is_file())
+    }
+
+    /// Looks up an entry by its package index.
+    pub fn entry(&self, entry_index: usize) -> Option<&PackageEntry> {
+        self.entries.get(entry_index)
+    }
+
+    /// Returns the package entry that owns the given global chunk index.
+    pub fn entry_for_chunk(&self, chunk_index: u64) -> Option<(usize, &PackageEntry)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.contains_chunk(chunk_index))
+    }
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        if self.root_name.trim().is_empty() {
             return Err(ProtocolError::EmptyFileName);
         }
         if self.chunk_size == 0 {
             return Err(ProtocolError::InvalidChunkSize(0));
         }
 
-        let mut bytes = Vec::with_capacity(TRANSFER_MANIFEST_PREAMBLE_LEN + usize::from(name_len));
-        bytes.extend_from_slice(&TRANSFER_MANIFEST_MAGIC);
-        bytes.extend_from_slice(&self.file_size.to_le_bytes());
-        bytes.extend_from_slice(&self.chunk_size.to_le_bytes());
-        bytes.extend_from_slice(&self.chunk_count.to_le_bytes());
-        bytes.extend_from_slice(&self.file_sha256);
-        bytes.extend_from_slice(&name_len.to_le_bytes());
-        bytes.extend_from_slice(name_bytes);
-        Ok(bytes)
-    }
+        let mut computed_total_bytes = 0_u64;
+        let mut computed_chunk_count = 0_u64;
+        let mut computed_files = 0_u64;
+        let mut computed_directories = u64::from(self.root_kind.is_directory());
+        let mut expected_chunk_index = 0_u64;
 
-    /// Parses the fixed-length prefix of a transfer manifest.
-    pub fn decode_preamble(
-        preamble: &[u8; TRANSFER_MANIFEST_PREAMBLE_LEN],
-    ) -> Result<(u64, u32, u64, Sha256Hash, usize), ProtocolError> {
-        if &preamble[..4] != TRANSFER_MANIFEST_MAGIC.as_slice() {
-            return Err(ProtocolError::InvalidMagic);
+        for entry in &self.entries {
+            if entry.relative_path.trim().is_empty() {
+                return Err(ProtocolError::EmptyRelativePath);
+            }
+
+            if entry.is_directory() {
+                computed_directories = computed_directories.saturating_add(1);
+                if entry.file_size != 0 || entry.chunk_count != 0 || entry.first_chunk_index != expected_chunk_index {
+                    return Err(ProtocolError::InvalidManifest(format!(
+                        "directory entry {} contained file payload metadata",
+                        entry.relative_path
+                    )));
+                }
+                continue;
+            }
+
+            computed_files = computed_files.saturating_add(1);
+            computed_total_bytes = computed_total_bytes.saturating_add(entry.file_size);
+            let expected_file_chunks = if entry.file_size == 0 {
+                0
+            } else {
+                entry.file_size.div_ceil(u64::from(self.chunk_size))
+            };
+            if entry.chunk_count != expected_file_chunks {
+                return Err(ProtocolError::InvalidManifest(format!(
+                    "file entry {} had chunk_count {} but expected {}",
+                    entry.relative_path, entry.chunk_count, expected_file_chunks
+                )));
+            }
+            if entry.first_chunk_index != expected_chunk_index {
+                return Err(ProtocolError::InvalidManifest(format!(
+                    "file entry {} started at chunk {} but expected {}",
+                    entry.relative_path, entry.first_chunk_index, expected_chunk_index
+                )));
+            }
+            expected_chunk_index = expected_chunk_index.saturating_add(entry.chunk_count);
+            computed_chunk_count = computed_chunk_count.saturating_add(entry.chunk_count);
         }
 
-        let mut file_size_bytes = [0_u8; 8];
-        file_size_bytes.copy_from_slice(&preamble[4..12]);
-
-        let mut chunk_size_bytes = [0_u8; 4];
-        chunk_size_bytes.copy_from_slice(&preamble[12..16]);
-
-        let mut chunk_count_bytes = [0_u8; 8];
-        chunk_count_bytes.copy_from_slice(&preamble[16..24]);
-
-        let mut file_sha256 = [0_u8; SHA256_LEN];
-        file_sha256.copy_from_slice(&preamble[24..56]);
-
-        let mut name_len_bytes = [0_u8; 2];
-        name_len_bytes.copy_from_slice(&preamble[56..58]);
-
-        let chunk_size = u32::from_le_bytes(chunk_size_bytes);
-        if chunk_size == 0 {
-            return Err(ProtocolError::InvalidChunkSize(0));
+        if computed_total_bytes != self.total_bytes {
+            return Err(ProtocolError::InvalidManifest(format!(
+                "manifest total_bytes {} did not match computed {}",
+                self.total_bytes, computed_total_bytes
+            )));
+        }
+        if computed_chunk_count != self.chunk_count {
+            return Err(ProtocolError::InvalidManifest(format!(
+                "manifest chunk_count {} did not match computed {}",
+                self.chunk_count, computed_chunk_count
+            )));
+        }
+        if computed_files != self.files_count {
+            return Err(ProtocolError::InvalidManifest(format!(
+                "manifest files_count {} did not match computed {}",
+                self.files_count, computed_files
+            )));
+        }
+        if computed_directories != self.directories_count {
+            return Err(ProtocolError::InvalidManifest(format!(
+                "manifest directories_count {} did not match computed {}",
+                self.directories_count, computed_directories
+            )));
         }
 
-        let name_len = usize::from(u16::from_le_bytes(name_len_bytes));
-        if name_len == 0 {
-            return Err(ProtocolError::EmptyFileName);
-        }
-
-        Ok((
-            u64::from_le_bytes(file_size_bytes),
-            chunk_size,
-            u64::from_le_bytes(chunk_count_bytes),
-            file_sha256,
-            name_len,
-        ))
-    }
-
-    /// Constructs a transfer manifest from decoded wire parts.
-    pub fn from_parts(
-        file_size: u64,
-        chunk_size: u32,
-        chunk_count: u64,
-        file_sha256: Sha256Hash,
-        file_name_bytes: Vec<u8>,
-    ) -> Result<Self, ProtocolError> {
-        let file_name = String::from_utf8(file_name_bytes).map_err(|_| ProtocolError::InvalidFileName)?;
-        if file_name.is_empty() {
-            return Err(ProtocolError::EmptyFileName);
-        }
-        if chunk_size == 0 {
-            return Err(ProtocolError::InvalidChunkSize(0));
-        }
-
-        Ok(Self {
-            file_name,
-            file_size,
-            chunk_size,
-            chunk_count,
-            file_sha256,
-        })
+        Ok(())
     }
 }
 
@@ -288,7 +412,7 @@ impl ResumePlan {
 /// Control frame acknowledging that a chunk has been verified and persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkAck {
-    /// Completed chunk index.
+    /// Completed global chunk index.
     pub chunk_index: u64,
 }
 
@@ -354,12 +478,18 @@ pub enum ProtocolError {
     FileNameTooLong(usize),
     /// The file name bytes were not valid UTF-8.
     InvalidFileName,
-    /// File transfers require a non-empty file name.
+    /// Transfers require a non-empty package root name.
     EmptyFileName,
+    /// Relative entry paths must be non-empty.
+    EmptyRelativePath,
     /// Chunk sizes must be positive.
     InvalidChunkSize(u32),
     /// Control frames must use a known status byte.
     InvalidStatusCode(u8),
+    /// The manifest payload failed semantic validation.
+    InvalidManifest(String),
+    /// The manifest version is not supported by this build.
+    UnsupportedProtocolVersion(u16),
 }
 
 impl fmt::Display for ProtocolError {
@@ -369,8 +499,11 @@ impl fmt::Display for ProtocolError {
             Self::FileNameTooLong(length) => write!(f, "file name too long for protocol header: {length} bytes"),
             Self::InvalidFileName => write!(f, "file name was not valid UTF-8"),
             Self::EmptyFileName => write!(f, "file name cannot be empty"),
+            Self::EmptyRelativePath => write!(f, "relative path cannot be empty"),
             Self::InvalidChunkSize(size) => write!(f, "invalid chunk size: {size}"),
             Self::InvalidStatusCode(code) => write!(f, "invalid transfer status code: {code}"),
+            Self::InvalidManifest(message) => write!(f, "invalid transfer manifest: {message}"),
+            Self::UnsupportedProtocolVersion(version) => write!(f, "unsupported protocol version: {version}"),
         }
     }
 }
@@ -382,41 +515,61 @@ mod tests {
     use integrity::sha256_bytes;
 
     use super::{
-        ChunkAck, ChunkDescriptor, ChunkStreamHeader, ResumePlan, TransferManifest, TransferStatus,
-        CHUNK_ACK_FRAME_LEN, CHUNK_STREAM_PREAMBLE_LEN, RESUME_PLAN_PREAMBLE_LEN,
-        TRANSFER_MANIFEST_PREAMBLE_LEN, TRANSFER_STATUS_FRAME_LEN,
+        ChunkAck, ChunkDescriptor, ChunkStreamHeader, PackageEntry, PackageItemKind, ResumePlan,
+        TransferManifest, TransferStatus, CHUNK_ACK_FRAME_LEN, CHUNK_STREAM_PREAMBLE_LEN,
+        RESUME_PLAN_PREAMBLE_LEN, TRANSFER_MANIFEST_HEADER_LEN, TRANSFER_STATUS_FRAME_LEN,
     };
 
     #[test]
     fn transfer_manifest_round_trips() {
         let manifest = TransferManifest {
-            file_name: "archive.tar".to_owned(),
-            file_size: 123_456,
+            root_name: "photos".to_owned(),
+            root_kind: PackageItemKind::Directory,
+            total_bytes: 123_456,
             chunk_size: 4_096,
             chunk_count: 31,
-            file_sha256: sha256_bytes(b"archive contents"),
+            files_count: 2,
+            directories_count: 2,
+            entries: vec![
+                PackageEntry {
+                    relative_path: "empty".to_owned(),
+                    item_kind: PackageItemKind::Directory,
+                    file_size: 0,
+                    file_sha256: [0_u8; 32],
+                    first_chunk_index: 0,
+                    chunk_count: 0,
+                },
+                PackageEntry {
+                    relative_path: "nested/cat.jpg".to_owned(),
+                    item_kind: PackageItemKind::File,
+                    file_size: 120_000,
+                    file_sha256: sha256_bytes(b"cat"),
+                    first_chunk_index: 0,
+                    chunk_count: 30,
+                },
+                PackageEntry {
+                    relative_path: "nested/dog.jpg".to_owned(),
+                    item_kind: PackageItemKind::File,
+                    file_size: 3_456,
+                    file_sha256: sha256_bytes(b"dog"),
+                    first_chunk_index: 30,
+                    chunk_count: 1,
+                },
+            ],
         };
 
         let encoded = manifest.encode().expect("encoding should succeed");
-        let mut preamble = [0_u8; TRANSFER_MANIFEST_PREAMBLE_LEN];
-        preamble.copy_from_slice(&encoded[..TRANSFER_MANIFEST_PREAMBLE_LEN]);
-        let (file_size, chunk_size, chunk_count, file_sha256, name_len) =
-            TransferManifest::decode_preamble(&preamble).expect("preamble should decode");
-        let decoded = TransferManifest::from_parts(
-            file_size,
-            chunk_size,
-            chunk_count,
-            file_sha256,
-            encoded[TRANSFER_MANIFEST_PREAMBLE_LEN..][..name_len].to_vec(),
-        )
-        .expect("name should decode");
-
+        assert_eq!(&encoded[..4], b"FTM1");
+        assert_eq!(encoded.len(), TRANSFER_MANIFEST_HEADER_LEN + encoded[TRANSFER_MANIFEST_HEADER_LEN..].len());
+        let decoded = TransferManifest::decode(&encoded).expect("manifest should decode");
         assert_eq!(decoded, manifest);
+        assert!(decoded.entry_for_chunk(30).is_some());
     }
 
     #[test]
     fn chunk_header_round_trips() {
         let header = ChunkStreamHeader {
+            file_index: 7,
             descriptor: ChunkDescriptor {
                 index: 3,
                 offset: 12_288,

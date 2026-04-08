@@ -15,24 +15,21 @@ use std::{
 use anyhow::{bail, Context, Result};
 use chunker::FixedChunker;
 use discovery::{local_loopback_advertisement, short_fingerprint, NearbyReceiver, PeerAdvertisement};
-use integrity::{format_sha256, sha256_bytes, sha256_file, verify_sha256, IntegrityReport};
+use file_io::PackageChunkTask;
+use integrity::{format_sha256, sha256_bytes, IntegrityReport};
 use progress::{ProgressListener, ProgressReporter};
 use protocol::{
-    ChunkAck, ChunkDescriptor, ChunkStreamHeader, ResumePlan, TransferManifest, TransferMode,
-    TransferSession, TransferStatus,
+    ChunkAck, ChunkDescriptor, ChunkStreamHeader, PackageEntry, PackageItemKind, ResumePlan,
+    TransferManifest, TransferMode, TransferSession, TransferStatus,
 };
 use quic_transport::{
     InMemoryQuicTransport, QuicEndpointConfig, QuicReceiver, QuicSender, DEFAULT_SERVER_NAME,
 };
 use resume::{PersistentResumeState, ResumeState};
-use tokio::{
-    fs as tokio_fs,
-    sync::Semaphore,
-    task::{spawn_blocking, JoinSet},
-};
+use tokio::{sync::Semaphore, task::JoinSet};
 
+pub use file_io::SourceInspection as TransferSourceSummary;
 pub use progress::ProgressUpdate as TransferProgress;
-
 pub const DEFAULT_CHUNK_SIZE: u32 = 1_048_576;
 pub const DEFAULT_PARALLELISM: usize = 4;
 
@@ -133,6 +130,8 @@ pub struct TransferSummary {
     pub elapsed: Duration,
     pub average_mib_per_sec: f64,
     pub completed_chunks: u64,
+    pub completed_files: u64,
+    pub total_directories: u64,
     pub sha256_hex: String,
     pub integrity_verified: bool,
 }
@@ -178,66 +177,62 @@ impl ReceiverApp {
         let incoming = self.transport.accept_connection().await?;
         let mut control = incoming.accept_control_stream().await?;
         let manifest = control.manifest.clone();
-        let descriptors = descriptors_for_manifest(&manifest);
+        let chunk_plan = manifest_chunks(&manifest)?;
         let mut checkpoint = PersistentResumeState::load_or_create_in(&self.output_dir, &manifest)
-            .with_context(|| format!("failed to load receiver checkpoint for {}", manifest.file_name))?;
+            .with_context(|| format!("failed to load receiver checkpoint for {}", manifest.root_name))?;
+        let assembler = file_io::PackageAssembler::prepare(&self.output_dir, &manifest, checkpoint.existed())
+            .await?;
         let mut reporter = configure_reporter(
-            ProgressReporter::new(format!("Receiving {}", manifest.file_name), manifest.file_size),
+            ProgressReporter::new(
+                format!("Receiving {}", manifest.root_name),
+                manifest.total_bytes,
+                manifest.files_count,
+            ),
             progress_listener,
             render_terminal,
         );
 
         let completed_before_resume = checkpoint.completed_chunks().iter().copied().collect::<Vec<_>>();
-        reporter.advance(total_bytes_for_indices(&descriptors, &completed_before_resume)?);
+        reporter.advance(total_bytes_for_indices(&chunk_plan, &completed_before_resume)?);
+        reporter.set_completed_files(completed_files_from_chunks(&manifest, checkpoint.completed_chunks()));
         let missing_chunks = checkpoint.pending_chunks();
 
         if missing_chunks.is_empty() {
-            let destination_path = file_io::destination_path(&self.output_dir, &manifest.file_name)?;
-            let actual_file_sha256 = hash_file(&destination_path).await?;
-            if !verify_sha256(&actual_file_sha256, &manifest.file_sha256) {
-                bail!(
-                    "final file SHA-256 mismatch for resumed transfer: expected {}, got {}",
-                    format_sha256(&manifest.file_sha256),
-                    format_sha256(&actual_file_sha256)
-                );
-            }
-
+            assembler.verify_files().await?;
             control.send_resume_plan(&ResumePlan::from_missing_chunks(Vec::new())).await?;
             control.send_transfer_status(TransferStatus { complete: true }).await?;
             checkpoint.remove().with_context(|| format!(
-                "failed to remove receiver checkpoint {}",
-                manifest.file_name
+                "failed to remove receiver checkpoint for {}",
+                manifest.root_name
             ))?;
+            reporter.set_completed_files(manifest.files_count);
             let snapshot = reporter.finish();
 
             return Ok(ReceivedTransfer {
                 summary: TransferSummary {
-                    file_name: manifest.file_name,
+                    file_name: manifest.root_name.clone(),
                     bytes_transferred: snapshot.bytes_transferred,
                     elapsed: snapshot.elapsed,
                     average_mib_per_sec: snapshot.average_mib_per_sec,
                     completed_chunks: manifest.chunk_count,
-                    sha256_hex: format_sha256(&manifest.file_sha256),
+                    completed_files: manifest.files_count,
+                    total_directories: manifest.directories_count,
+                    sha256_hex: summary_sha256_hex(&manifest)?,
                     integrity_verified: true,
                 },
-                saved_path: destination_path,
+                saved_path: assembler.saved_path(),
                 remote_address: incoming.remote_address,
             });
         }
 
         let expected_missing = missing_chunks.iter().copied().collect::<BTreeSet<_>>();
-        let assembler = file_io::ChunkedFileAssembler::prepare(&self.output_dir, &manifest, checkpoint.has_progress())
-            .await?;
-        control
-            .send_resume_plan(&ResumePlan::from_missing_chunks(missing_chunks.clone()))
-            .await?;
-
+        control.send_resume_plan(&ResumePlan::from_missing_chunks(missing_chunks.clone())).await?;
         let mut scheduled_chunks = BTreeSet::new();
         let mut join_set = JoinSet::new();
 
         for _ in 0..missing_chunks.len() {
             let mut chunk = incoming.accept_chunk_stream().await?;
-            validate_chunk_header(&manifest, &chunk.header)?;
+            validate_chunk_header(&manifest, &chunk.header, &chunk_plan)?;
             let chunk_index = chunk.header.descriptor.index;
             if !expected_missing.contains(&chunk_index) {
                 bail!("received unexpected chunk {} that was not requested in the resume plan", chunk_index);
@@ -250,61 +245,56 @@ impl ReceiverApp {
             let header = chunk.header.clone();
             join_set.spawn(async move {
                 assembler.write_chunk_stream(&header, &mut chunk.stream).await?;
-                Ok::<ChunkDescriptor, anyhow::Error>(header.descriptor)
+                Ok::<u64, anyhow::Error>(header.descriptor.index)
             });
         }
 
         while let Some(result) = join_set.join_next().await {
-            let descriptor = result.context("receiver chunk task panicked")??;
+            let chunk_index = result.context("receiver chunk task panicked")??;
             if !checkpoint
-                .mark_complete(descriptor.index)
-                .with_context(|| format!("failed to persist receiver checkpoint for chunk {}", descriptor.index))?
+                .mark_complete(chunk_index)
+                .with_context(|| format!("failed to persist receiver checkpoint for chunk {}", chunk_index))?
             {
-                bail!("chunk {} completed more than once", descriptor.index);
+                bail!("chunk {} completed more than once", chunk_index);
             }
 
-            reporter.advance(u64::from(descriptor.size));
-            control
-                .send_chunk_ack(ChunkAck {
-                    chunk_index: descriptor.index,
-                })
-                .await?;
+            let manifest_chunk = chunk_for_index(&chunk_plan, chunk_index)?;
+            reporter.set_current_path(Some(display_current_path(&manifest, &manifest_chunk.relative_path)));
+            reporter.advance(u64::from(manifest_chunk.descriptor.size));
+            reporter.set_completed_files(completed_files_from_chunks(&manifest, checkpoint.completed_chunks()));
+            control.send_chunk_ack(ChunkAck { chunk_index }).await?;
         }
 
-        assembler.finalize().await?;
-        let destination_path = assembler.destination_path().to_path_buf();
-        let actual_file_sha256 = hash_file(&destination_path).await?;
-        if !verify_sha256(&actual_file_sha256, &manifest.file_sha256) {
-            bail!(
-                "final file SHA-256 mismatch: expected {}, got {}",
-                format_sha256(&manifest.file_sha256),
-                format_sha256(&actual_file_sha256)
-            );
-        }
-
+        assembler.verify_files().await?;
         control.send_transfer_status(TransferStatus { complete: true }).await?;
         checkpoint.remove().with_context(|| format!(
             "failed to remove receiver checkpoint for {}",
-            manifest.file_name
+            manifest.root_name
         ))?;
+        reporter.set_completed_files(manifest.files_count);
         let snapshot = reporter.finish();
 
         Ok(ReceivedTransfer {
             summary: TransferSummary {
-                file_name: manifest.file_name,
+                file_name: manifest.root_name.clone(),
                 bytes_transferred: snapshot.bytes_transferred,
                 elapsed: snapshot.elapsed,
                 average_mib_per_sec: snapshot.average_mib_per_sec,
                 completed_chunks: manifest.chunk_count,
-                sha256_hex: format_sha256(&manifest.file_sha256),
+                completed_files: manifest.files_count,
+                total_directories: manifest.directories_count,
+                sha256_hex: summary_sha256_hex(&manifest)?,
                 integrity_verified: true,
             },
-            saved_path: destination_path,
+            saved_path: assembler.saved_path(),
             remote_address: incoming.remote_address,
         })
     }
 }
 
+pub async fn inspect_transfer_source(source_path: &Path) -> Result<TransferSourceSummary> {
+    file_io::inspect_source(source_path).await
+}
 pub fn assess_discovered_receiver(receiver: &NearbyReceiver, trust_cache_dir: &Path) -> Result<ReceiverTrustReport> {
     if receiver.certificate_der.is_empty() {
         bail!("discovered receiver {} did not include a certificate", receiver.device_name);
@@ -406,69 +396,52 @@ async fn send_file_internal(
     progress_listener: Option<ProgressListener>,
     render_terminal: bool,
 ) -> Result<TransferSummary> {
-    let source_metadata = tokio_fs::metadata(&request.source_path)
-        .await
-        .with_context(|| format!("failed to read source metadata for {}", request.source_path.display()))?;
-    if !source_metadata.is_file() {
-        bail!("source path is not a regular file: {}", request.source_path.display());
-    }
-
-    let source_file_sha256 = hash_file(&request.source_path).await?;
-    let chunk_size = request.chunk_size.max(1);
-    let descriptors = FixedChunker::new(source_metadata.len(), chunk_size).descriptors();
-    let manifest = file_io::build_manifest(
-        &request.source_path,
-        chunk_size,
-        descriptors.len() as u64,
-        source_file_sha256,
-    )
-    .await?;
+    let package = file_io::build_source_package(&request.source_path, request.chunk_size).await?;
+    let manifest = package.manifest.clone();
     let mut checkpoint = PersistentResumeState::load_or_create_in(sender_checkpoint_base_dir(&request.source_path), &manifest)
         .with_context(|| format!("failed to load sender checkpoint for {}", request.source_path.display()))?;
     let transport = Arc::new(
-        QuicSender::connect(
-            request.server_addr,
-            &request.server_name,
-            &request.certificate_path,
-        )
-        .await?,
+        QuicSender::connect(request.server_addr, &request.server_name, &request.certificate_path).await?,
     );
     let mut control = transport.open_control_stream(&manifest).await?;
     let resume_plan = control.read_resume_plan().await?;
     let missing_chunks = validate_resume_plan(&manifest, &resume_plan)?;
-    let completed_on_receiver = completed_indices_from_missing(&descriptors, &missing_chunks);
+    let completed_on_receiver = completed_indices_from_missing(&package.chunks, &missing_chunks);
 
     let mut reporter = configure_reporter(
-        ProgressReporter::new(format!("Sending {}", manifest.file_name), manifest.file_size),
+        ProgressReporter::new(
+            format!("Sending {}", manifest.root_name),
+            manifest.total_bytes,
+            manifest.files_count,
+        ),
         progress_listener,
         render_terminal,
     );
-    reporter.advance(total_bytes_for_indices(&descriptors, &completed_on_receiver)?);
+    reporter.advance(total_bytes_for_indices(&package.chunks, &completed_on_receiver)?);
+    reporter.set_completed_files(completed_files_from_missing(&manifest, &missing_chunks));
 
     let concurrency_limit = request.parallelism.max(1).min(missing_chunks.len().max(1));
     let semaphore = Arc::new(Semaphore::new(concurrency_limit));
     let mut join_set = JoinSet::new();
 
     for chunk_index in &missing_chunks {
-        let descriptor = descriptor_for_index(&descriptors, *chunk_index)?.clone();
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .context("failed to acquire chunk scheduling permit")?;
+        let task = package
+            .chunk_task(*chunk_index)
+            .cloned()
+            .with_context(|| format!("missing sender chunk task for chunk {}", chunk_index))?;
+        let permit = semaphore.clone().acquire_owned().await.context("failed to acquire chunk scheduling permit")?;
         let transport = Arc::clone(&transport);
-        let source_path = request.source_path.clone();
-        let descriptor_for_task = descriptor.clone();
 
         join_set.spawn(async move {
             let _permit = permit;
-            let payload = file_io::read_chunk(&source_path, &descriptor_for_task).await?;
+            let payload = file_io::read_chunk(&task.source_path, &task.descriptor).await?;
             let header = ChunkStreamHeader {
-                descriptor: descriptor_for_task.clone(),
+                file_index: task.file_index,
+                descriptor: task.descriptor.clone(),
                 chunk_sha256: sha256_bytes(&payload),
             };
             transport.send_chunk(&header, &payload).await?;
-            Ok::<ChunkDescriptor, anyhow::Error>(descriptor_for_task)
+            Ok::<PackageChunkTask, anyhow::Error>(task)
         });
     }
 
@@ -493,7 +466,12 @@ async fn send_file_internal(
                 {
                     bail!("sender checkpoint already contained acknowledged chunk {}", ack.chunk_index);
                 }
-                reporter.advance(u64::from(descriptor_for_index(&descriptors, ack.chunk_index)?.size));
+                let task = package
+                    .chunk_task(ack.chunk_index)
+                    .with_context(|| format!("missing sender chunk task for acknowledged chunk {}", ack.chunk_index))?;
+                reporter.set_current_path(Some(display_current_path(&manifest, &task.relative_path)));
+                reporter.advance(u64::from(task.descriptor.size));
+                reporter.set_completed_files(completed_files_from_chunks(&manifest, checkpoint.completed_chunks()));
             }
         }
     }
@@ -511,20 +489,22 @@ async fn send_file_internal(
         "failed to remove sender checkpoint for {}",
         request.source_path.display()
     ))?;
+    reporter.set_completed_files(manifest.files_count);
     let snapshot = reporter.finish();
     transport.close();
 
     Ok(TransferSummary {
-        file_name: manifest.file_name,
+        file_name: manifest.root_name,
         bytes_transferred: snapshot.bytes_transferred,
         elapsed: snapshot.elapsed,
         average_mib_per_sec: snapshot.average_mib_per_sec,
         completed_chunks: manifest.chunk_count,
-        sha256_hex: format_sha256(&manifest.file_sha256),
+        completed_files: manifest.files_count,
+        total_directories: manifest.directories_count,
+        sha256_hex: summary_sha256_hex(&package.manifest)?,
         integrity_verified: true,
     })
 }
-
 pub fn build_transfer_plan(
     file_name: impl Into<String>,
     total_bytes: u64,
@@ -695,33 +675,120 @@ fn persist_discovered_certificate(receiver: &NearbyReceiver, trust_cache_dir: &P
     Ok(cert_path)
 }
 
-fn descriptors_for_manifest(manifest: &TransferManifest) -> Vec<ChunkDescriptor> {
-    FixedChunker::new(manifest.file_size, manifest.chunk_size).descriptors()
+#[derive(Debug, Clone)]
+struct ManifestChunk {
+    file_index: usize,
+    relative_path: String,
+    descriptor: ChunkDescriptor,
 }
 
-fn completed_indices_from_missing(descriptors: &[ChunkDescriptor], missing: &BTreeSet<u64>) -> Vec<u64> {
-    descriptors
-        .iter()
-        .filter(|descriptor| !missing.contains(&descriptor.index))
-        .map(|descriptor| descriptor.index)
+fn manifest_chunks(manifest: &TransferManifest) -> Result<Vec<ManifestChunk>> {
+    let mut chunks = Vec::with_capacity(manifest.chunk_count as usize);
+    for (file_index, entry) in manifest.file_entries() {
+        let local_descriptors = file_descriptors(manifest.chunk_size, entry);
+        if local_descriptors.len() as u64 != entry.chunk_count {
+            bail!(
+                "manifest entry {} reported {} chunks but planned {}",
+                entry.relative_path,
+                entry.chunk_count,
+                local_descriptors.len()
+            );
+        }
+        for descriptor in local_descriptors {
+            chunks.push(ManifestChunk {
+                file_index,
+                relative_path: entry.relative_path.clone(),
+                descriptor: ChunkDescriptor {
+                    index: entry.first_chunk_index + descriptor.index,
+                    offset: descriptor.offset,
+                    size: descriptor.size,
+                },
+            });
+        }
+    }
+    if chunks.len() as u64 != manifest.chunk_count {
+        bail!("manifest chunk count {} did not match planned {}", manifest.chunk_count, chunks.len());
+    }
+    Ok(chunks)
+}
+
+fn file_descriptors(chunk_size: u32, entry: &PackageEntry) -> Vec<ChunkDescriptor> {
+    (0..entry.chunk_count)
+        .map(|index| {
+            let offset = index * u64::from(chunk_size);
+            let remaining = entry.file_size.saturating_sub(offset);
+            ChunkDescriptor {
+                index,
+                offset,
+                size: remaining.min(u64::from(chunk_size)) as u32,
+            }
+        })
         .collect()
 }
 
-fn total_bytes_for_indices(descriptors: &[ChunkDescriptor], indices: &[u64]) -> Result<u64> {
+fn completed_indices_from_missing(chunks: &[PackageChunkTask], missing: &BTreeSet<u64>) -> Vec<u64> {
+    chunks
+        .iter()
+        .filter(|chunk| !missing.contains(&chunk.descriptor.index))
+        .map(|chunk| chunk.descriptor.index)
+        .collect()
+}
+
+trait ChunkLike {
+    fn descriptor(&self) -> &ChunkDescriptor;
+}
+
+impl ChunkLike for PackageChunkTask {
+    fn descriptor(&self) -> &ChunkDescriptor { &self.descriptor }
+}
+
+impl ChunkLike for ManifestChunk {
+    fn descriptor(&self) -> &ChunkDescriptor { &self.descriptor }
+}
+
+fn total_bytes_for_indices<T>(chunks: &[T], indices: &[u64]) -> Result<u64>
+where
+    T: ChunkLike,
+{
     let mut total = 0_u64;
     for chunk_index in indices {
         total = total
-            .checked_add(u64::from(descriptor_for_index(descriptors, *chunk_index)?.size))
+            .checked_add(u64::from(chunk_for_index(chunks, *chunk_index)?.descriptor().size))
             .context("chunk byte count overflowed u64")?;
     }
     Ok(total)
 }
 
-fn descriptor_for_index(descriptors: &[ChunkDescriptor], chunk_index: u64) -> Result<&ChunkDescriptor> {
-    descriptors
+fn chunk_for_index<'a, T>(chunks: &'a [T], chunk_index: u64) -> Result<&'a T>
+where
+    T: ChunkLike,
+{
+    chunks
         .get(chunk_index as usize)
-        .filter(|descriptor| descriptor.index == chunk_index)
+        .filter(|chunk| chunk.descriptor().index == chunk_index)
         .ok_or_else(|| anyhow::anyhow!("missing descriptor for chunk {}", chunk_index))
+}
+
+fn completed_files_from_missing(manifest: &TransferManifest, missing: &BTreeSet<u64>) -> u64 {
+    manifest
+        .file_entries()
+        .filter(|(_, entry)| {
+            entry.chunk_count == 0
+                || (entry.first_chunk_index..entry.first_chunk_index + entry.chunk_count)
+                    .all(|chunk_index| !missing.contains(&chunk_index))
+        })
+        .count() as u64
+}
+
+fn completed_files_from_chunks(manifest: &TransferManifest, completed_chunks: &BTreeSet<u64>) -> u64 {
+    manifest
+        .file_entries()
+        .filter(|(_, entry)| {
+            entry.chunk_count == 0
+                || (entry.first_chunk_index..entry.first_chunk_index + entry.chunk_count)
+                    .all(|chunk_index| completed_chunks.contains(&chunk_index))
+        })
+        .count() as u64
 }
 
 fn validate_resume_plan(manifest: &TransferManifest, resume_plan: &ResumePlan) -> Result<BTreeSet<u64>> {
@@ -741,40 +808,50 @@ fn validate_resume_plan(manifest: &TransferManifest, resume_plan: &ResumePlan) -
     Ok(missing)
 }
 
-fn validate_chunk_header(manifest: &TransferManifest, header: &ChunkStreamHeader) -> Result<()> {
-    let descriptor = &header.descriptor;
-    if descriptor.index >= manifest.chunk_count {
+fn validate_chunk_header(manifest: &TransferManifest, header: &ChunkStreamHeader, chunks: &[ManifestChunk]) -> Result<()> {
+    if header.descriptor.index >= manifest.chunk_count {
         bail!(
             "received out-of-range chunk index {} for transfer with {} chunks",
-            descriptor.index,
+            header.descriptor.index,
             manifest.chunk_count
         );
     }
-
-    let chunk_end = descriptor
-        .offset
-        .checked_add(u64::from(descriptor.size))
-        .context("chunk descriptor overflowed the file boundary")?;
-    if chunk_end > manifest.file_size {
+    let expected = chunk_for_index(chunks, header.descriptor.index)?;
+    if header.file_index as usize != expected.file_index {
         bail!(
-            "chunk {} exceeded the destination file boundary: end {} > size {}",
-            descriptor.index,
-            chunk_end,
-            manifest.file_size
+            "chunk {} referenced file index {} but expected {}",
+            header.descriptor.index,
+            header.file_index,
+            expected.file_index
         );
     }
-
+    if header.descriptor.offset != expected.descriptor.offset || header.descriptor.size != expected.descriptor.size {
+        bail!(
+            "chunk {} descriptor mismatch: expected offset {} size {}, got offset {} size {}",
+            header.descriptor.index,
+            expected.descriptor.offset,
+            expected.descriptor.size,
+            header.descriptor.offset,
+            header.descriptor.size
+        );
+    }
     Ok(())
 }
 
-async fn hash_file(path: &Path) -> Result<integrity::Sha256Hash> {
-    let owned_path = path.to_path_buf();
-    spawn_blocking(move || sha256_file(&owned_path))
-        .await
-        .context("file hashing task panicked")?
-        .with_context(|| format!("failed to compute SHA-256 for {}", path.display()))
+fn display_current_path(manifest: &TransferManifest, relative_path: &str) -> String {
+    match manifest.root_kind {
+        PackageItemKind::Directory => format!("{}/{}", manifest.root_name, relative_path),
+        PackageItemKind::File => relative_path.to_owned(),
+    }
 }
 
+fn summary_sha256_hex(manifest: &TransferManifest) -> Result<String> {
+    let files = manifest.file_entries().collect::<Vec<_>>();
+    if files.len() == 1 && manifest.root_kind == PackageItemKind::File {
+        return Ok(format_sha256(&files[0].1.file_sha256));
+    }
+    Ok(format_sha256(&manifest.fingerprint()?))
+}
 #[cfg(test)]
 mod tests {
     use super::build_transfer_plan;

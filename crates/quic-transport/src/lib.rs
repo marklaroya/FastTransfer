@@ -1,4 +1,4 @@
-﻿//! QUIC transport abstractions and a Quinn-based parallel chunk transport.
+//! QUIC transport abstractions and a Quinn-based parallel chunk transport.
 
 use std::{
     fs,
@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use protocol::{
     ChunkAck, ChunkStreamHeader, ResumePlan, TransferManifest, TransferSession, TransferStatus,
     CHUNK_STREAM_MAGIC, CHUNK_STREAM_PREAMBLE_LEN, CHUNK_ACK_FRAME_LEN, RESUME_PLAN_PREAMBLE_LEN,
-    TRANSFER_MANIFEST_PREAMBLE_LEN, TRANSFER_STATUS_FRAME_LEN,
+    TRANSFER_STATUS_FRAME_LEN,
 };
 use quic::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
@@ -26,6 +26,7 @@ use rustls::{
 pub const DEFAULT_SERVER_NAME: &str = "fasttransfer.local";
 
 const MAX_CONCURRENT_UNI_STREAMS: u32 = 64;
+const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// Transport configuration values suitable for a production baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,21 +433,11 @@ fn client_bind_addr(server_addr: SocketAddr) -> SocketAddr {
 }
 
 async fn read_manifest_from_stream(stream: &mut RecvStream) -> Result<TransferManifest> {
-    let mut preamble = [0_u8; TRANSFER_MANIFEST_PREAMBLE_LEN];
-    stream
-        .read_exact(&mut preamble)
+    let bytes = stream
+        .read_to_end(MAX_MANIFEST_BYTES)
         .await
-        .context("failed to read transfer-manifest preamble")?;
-    let (file_size, chunk_size, chunk_count, file_sha256, name_len) =
-        TransferManifest::decode_preamble(&preamble).context("failed to decode transfer manifest")?;
-    let mut file_name_bytes = vec![0_u8; name_len];
-    stream
-        .read_exact(&mut file_name_bytes)
-        .await
-        .context("failed to read transfer-manifest file name")?;
-
-    TransferManifest::from_parts(file_size, chunk_size, chunk_count, file_sha256, file_name_bytes)
-        .context("invalid transfer manifest payload")
+        .context("failed to read transfer-manifest payload")?;
+    TransferManifest::decode(&bytes).context("invalid transfer manifest payload")
 }
 
 

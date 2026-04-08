@@ -6,7 +6,15 @@ const elements = {
   sourcePath: $("#source-path"),
   nearbyDevices: $("#nearby-devices"),
   refreshDevices: $("#refresh-devices"),
-  pickSource: $("#pick-source"),
+  pickSourceFile: $("#pick-source-file"),
+  pickSourceFolder: $("#pick-source-folder"),
+  packageKindBadge: $("#package-kind-badge"),
+  packageSummaryMessage: $("#package-summary-message"),
+  packageRootName: $("#package-root-name"),
+  packageRootKind: $("#package-root-kind"),
+  packageTotalFiles: $("#package-total-files"),
+  packageTotalFolders: $("#package-total-folders"),
+  packageTotalBytes: $("#package-total-bytes"),
   sendButton: $("#send-button"),
   sendBadge: $("#send-badge"),
   sendMessage: $("#send-message"),
@@ -31,19 +39,29 @@ const elements = {
   chunkSize: $("#chunk-size"),
   parallelism: $("#parallelism"),
   deviceName: $("#device-name"),
+  receiverOutput: $("#receiver-output"),
+  browseOutput: $("#browse-output"),
   startReceiver: $("#start-receiver"),
+  startReceiverTop: $("#start-receiver-top"),
   receiverBadge: $("#receiver-badge"),
   receiverMessage: $("#receiver-message"),
   receiverProgressBar: $("#receiver-progress-bar"),
   receiverProgressText: $("#receiver-progress-text"),
   receiverSpeed: $("#receiver-speed"),
   receiverBind: $("#receiver-bind"),
-  receiverOutput: $("#receiver-output"),
   receiverFile: $("#receiver-file"),
   receiverSavedPath: $("#receiver-saved-path"),
+  receiverCertificate: $("#receiver-certificate"),
 };
 
-const appState = { devices: [], selectedPeerId: null, sendBusy: false, receiverBusy: false };
+const appState = {
+  devices: [],
+  selectedPeerId: null,
+  sendBusy: false,
+  receiverBusy: false,
+  sourceSummary: null,
+  receiveOutputDir: null,
+};
 
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
@@ -76,8 +94,58 @@ function labelForTrust(trustState) {
   return "Unknown";
 }
 
+function labelForPackageKind(rootKind) {
+  return rootKind === "directory" ? "Folder package" : rootKind === "file" ? "Single file" : "Unknown";
+}
+
+function setReceiverActionDisabled(disabled) {
+  elements.startReceiver.disabled = disabled;
+  elements.startReceiverTop.disabled = disabled;
+}
+
 function selectedDevice() {
   return appState.devices.find((device) => device.peerId === appState.selectedPeerId) ?? null;
+}
+
+function renderPackageSummary() {
+  const summary = appState.sourceSummary;
+  if (!summary) {
+    setBadge(elements.packageKindBadge, "Nothing selected", "idle");
+    elements.packageSummaryMessage.textContent = "Choose a file or folder to preview the package structure before sending.";
+    elements.packageRootName.textContent = "Pending";
+    elements.packageRootKind.textContent = "Pending";
+    elements.packageTotalFiles.textContent = "0";
+    elements.packageTotalFolders.textContent = "0";
+    elements.packageTotalBytes.textContent = "0 B";
+    elements.sendSummaryFile.textContent = "Not started";
+    return;
+  }
+
+  const kindLabel = labelForPackageKind(summary.rootKind);
+  setBadge(elements.packageKindBadge, kindLabel, summary.rootKind === "directory" ? "active" : "success");
+  elements.packageSummaryMessage.textContent = `Ready to send ${summary.rootName} with ${summary.totalFiles.toLocaleString()} file${summary.totalFiles === 1 ? "" : "s"}.`;
+  elements.packageRootName.textContent = summary.rootName;
+  elements.packageRootKind.textContent = kindLabel;
+  elements.packageTotalFiles.textContent = summary.totalFiles.toLocaleString();
+  elements.packageTotalFolders.textContent = summary.totalDirectories.toLocaleString();
+  elements.packageTotalBytes.textContent = formatBytes(summary.totalBytes);
+  elements.sendSummaryFile.textContent = summary.rootName;
+}
+
+async function setSourcePath(path) {
+  elements.sourcePath.value = path;
+  appState.sourceSummary = null;
+  renderPackageSummary();
+
+  try {
+    const summary = await invoke("inspect_source", { sourcePath: path });
+    appState.sourceSummary = summary;
+    renderPackageSummary();
+  } catch (error) {
+    appState.sourceSummary = null;
+    renderPackageSummary();
+    applySendStatus({ state: "error", message: `Failed to inspect source: ${error}` });
+  }
 }
 
 function renderSelectedDevice() {
@@ -118,18 +186,16 @@ function renderDevices() {
       const selected = device.peerId === appState.selectedPeerId ? " selected" : "";
       const trustLabel = labelForTrust(device.trustState);
       const disabled = device.trustState === "fingerprint_mismatch" ? "disabled" : "";
-      const buttonLabel = device.peerId === appState.selectedPeerId ? "Selected" : "Use device";
+      const buttonLabel = device.peerId === appState.selectedPeerId ? "Selected" : "Select";
       return `
         <div class="device-card${selected}">
           <div>
             <h3>${device.deviceName}</h3>
             <p>${device.addresses.join(", ")}</p>
-            <p>${device.peerId} via ${device.transport}</p>
             <div class="device-meta">
               <span class="badge ${badgeKindForTrust(device.trustState)}">${trustLabel}</span>
               <span class="badge idle">${device.shortFingerprint}</span>
             </div>
-            <p>${device.trustMessage}</p>
           </div>
           <button type="button" data-index="${index}" ${disabled}>${buttonLabel}</button>
         </div>
@@ -171,41 +237,53 @@ function applySendStatus(payload) {
   if (payload.progress) {
     applyProgress(elements.sendProgressBar, elements.sendProgressText, elements.sendSpeed, payload.progress);
     elements.sendSummaryBytes.textContent = `${formatBytes(payload.progress.transferredBytes)} / ${formatBytes(payload.progress.totalBytes)}`;
+    elements.sendSummaryChunks.textContent = `${payload.progress.completedFiles} / ${payload.progress.totalFiles}`;
+    if (payload.progress.currentPath) elements.sendSummaryHash.textContent = payload.progress.currentPath;
   }
 
   if (payload.summary) {
     elements.sendSummaryFile.textContent = payload.summary.fileName;
     elements.sendSummaryBytes.textContent = formatBytes(payload.summary.bytesTransferred);
-    elements.sendSummaryChunks.textContent = String(payload.summary.completedChunks);
-    elements.sendSummaryHash.textContent = payload.summary.sha256Hex;
+    elements.sendSummaryChunks.textContent = String(payload.summary.completedFiles);
+    elements.sendSummaryHash.textContent = "Verified";
   }
 }
 
 function applyReceiverStatus(payload) {
   const state = payload.state ?? "idle";
   appState.receiverBusy = state === "starting" || state === "listening" || state === "receiving";
-  elements.startReceiver.disabled = appState.receiverBusy;
-  elements.receiverMessage.textContent = payload.message ?? "Receiver idle.";
+  setReceiverActionDisabled(appState.receiverBusy);
+  elements.receiverMessage.textContent = payload.message ?? "Start the receiver to advertise this device and accept incoming transfers";
 
   if (state === "completed") setBadge(elements.receiverBadge, "Received", "success");
   else if (state === "error") setBadge(elements.receiverBadge, "Error", "error");
   else if (appState.receiverBusy) setBadge(elements.receiverBadge, state === "receiving" ? "Receiving" : "Listening", "active");
   else setBadge(elements.receiverBadge, "Idle", "idle");
 
-  if (payload.bindAddr) elements.receiverBind.textContent = payload.bindAddr;
   if (payload.outputDirLabel || payload.outputDir) {
-    elements.receiverOutput.textContent = payload.outputDirLabel ?? payload.outputDir;
+    elements.receiverOutput.value = payload.outputDirLabel ?? payload.outputDir;
+  }
+  if (payload.bindAddr) {
+    elements.receiverBind.textContent = payload.bindAddr;
   }
   if (payload.savedPathLabel || payload.savedPath) {
     elements.receiverSavedPath.textContent = payload.savedPathLabel ?? payload.savedPath;
   }
-  if (payload.summary) elements.receiverFile.textContent = payload.summary.fileName;
-  if (payload.progress) applyProgress(elements.receiverProgressBar, elements.receiverProgressText, elements.receiverSpeed, payload.progress);
+  if (payload.certificatePath) {
+    elements.receiverCertificate.textContent = payload.certificatePath.split(/[\\/]/).pop() ?? payload.certificatePath;
+  }
+  if (payload.progress) {
+    applyProgress(elements.receiverProgressBar, elements.receiverProgressText, elements.receiverSpeed, payload.progress);
+    if (payload.progress.currentPath) elements.receiverFile.textContent = payload.progress.currentPath;
+  }
+  if (payload.summary) {
+    elements.receiverFile.textContent = payload.summary.fileName;
+  }
 }
 
 async function refreshDevices() {
   elements.refreshDevices.disabled = true;
-  elements.refreshDevices.textContent = "Scanning...";
+  elements.refreshDevices.textContent = "Refreshing...";
   try {
     appState.devices = await invoke("discover_nearby_receivers", { timeoutSecs: 3 });
     renderDevices();
@@ -216,19 +294,37 @@ async function refreshDevices() {
     applySendStatus({ state: "error", message: `Device discovery failed: ${error}` });
   } finally {
     elements.refreshDevices.disabled = false;
-    elements.refreshDevices.textContent = "Refresh devices";
+    elements.refreshDevices.textContent = "Refresh";
+  }
+}
+
+async function browseReceiveOutput() {
+  try {
+    const selected = await invoke("pick_receive_folder");
+    if (selected) {
+      appState.receiveOutputDir = selected;
+      elements.receiverOutput.value = selected;
+    }
+  } catch (error) {
+    applyReceiverStatus({ state: "error", message: `${error}` });
   }
 }
 
 async function startReceiver() {
   try {
-    const response = await invoke("start_receiver", { deviceName: elements.deviceName.value.trim() || null });
+    const response = await invoke("start_receiver", {
+      deviceName: elements.deviceName.value.trim() || null,
+      outputDir: appState.receiveOutputDir,
+    });
+    appState.receiveOutputDir = response.outputDir;
+    elements.receiverOutput.value = response.outputDirLabel ?? response.outputDir;
     applyReceiverStatus({
       state: "starting",
       message: `Preparing receiver on ${response.bindAddr}`,
       bindAddr: response.bindAddr,
       outputDir: response.outputDir,
       outputDirLabel: response.outputDirLabel,
+      certificatePath: response.certificatePath,
     });
   } catch (error) {
     applyReceiverStatus({ state: "error", message: `${error}` });
@@ -237,7 +333,7 @@ async function startReceiver() {
 
 async function startSend() {
   if (!elements.sourcePath.value) {
-    applySendStatus({ state: "error", message: "Choose a source file before sending." });
+    applySendStatus({ state: "error", message: "Choose a source file or folder before sending." });
     return;
   }
 
@@ -275,16 +371,22 @@ async function startSend() {
 }
 
 function wireEvents() {
-  elements.pickSource.addEventListener("click", async () => {
+  elements.pickSourceFile.addEventListener("click", async () => {
     const selected = await invoke("pick_source_file");
-    if (selected) elements.sourcePath.value = selected;
+    if (selected) await setSourcePath(selected);
+  });
+  elements.pickSourceFolder.addEventListener("click", async () => {
+    const selected = await invoke("pick_source_folder");
+    if (selected) await setSourcePath(selected);
   });
   elements.pickCertificate.addEventListener("click", async () => {
     const selected = await invoke("pick_certificate_file");
     if (selected) elements.certificatePath.value = selected;
   });
+  elements.browseOutput.addEventListener("click", browseReceiveOutput);
   elements.refreshDevices.addEventListener("click", refreshDevices);
   elements.startReceiver.addEventListener("click", startReceiver);
+  elements.startReceiverTop.addEventListener("click", startReceiver);
   elements.sendButton.addEventListener("click", startSend);
   elements.manualMode.addEventListener("change", () => {
     if (elements.manualMode.checked) {
@@ -300,6 +402,8 @@ async function bootstrap() {
   await listen("send-status", (event) => applySendStatus(event.payload));
   await listen("receiver-status", (event) => applyReceiverStatus(event.payload));
   renderDevices();
+  renderSelectedDevice();
+  renderPackageSummary();
   await startReceiver();
   await refreshDevices();
 }

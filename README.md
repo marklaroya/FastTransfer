@@ -50,13 +50,13 @@ cargo check --workspace
 
 ### Desktop-to-desktop QUIC prototype
 
-The prototype is implemented with `quinn` and lives in the Rust workspace. Files are split into configurable chunks, sent over multiple QUIC streams in parallel, and reassembled on the receiver by chunk offset.
+The prototype is implemented with `quinn` and lives in the Rust workspace. A transfer source can be either a single file or a whole folder. Folder transfers are scanned recursively, split into configurable chunks, sent over multiple QUIC streams in parallel, and reassembled on the receiver with the original relative paths preserved.
 
 Start the receiver in one terminal:
 
-```powershell
+`````powershell
 cargo run -p transfer-core --bin ft-receive -- --bind 0.0.0.0:5000 --output-dir ./received
-```
+`````
 
 On first run, the receiver generates a self-signed development certificate at `./.fasttransfer/certs/receiver-cert.der` and the matching key at `./.fasttransfer/certs/receiver-key.der`.
 
@@ -66,10 +66,10 @@ Discover nearby receivers from another terminal:
 cargo run -p transfer-core --bin ft-send -- discover --timeout-secs 3
 ```
 
-Send a file to a specific receiver:
+Send a file or folder package to a specific receiver:
 
 ```powershell
-cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --file ./path/to/big-file.iso --cert ./.fasttransfer/certs/receiver-cert.der --chunk-size 1048576 --parallelism 4
+cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --source ./path/to/big-file.iso --cert ./.fasttransfer/certs/receiver-cert.der --chunk-size 1048576 --parallelism 4
 ```
 
 For the Rust CLI prototype, manual target mode still expects the receiver certificate path via `--cert`. The desktop app's discovered-device flow now handles certificate trust automatically over LAN discovery.
@@ -102,21 +102,21 @@ cargo run -p transfer-core --bin ft-send -- discover --timeout-secs 5
 
 5. If the same receiver later advertises a different certificate fingerprint, the desktop app reports a fingerprint mismatch and blocks the discovered-device send path until the change is handled deliberately.
 
-6. For the current Rust CLI prototype, nearby discovery helps you find the receiver address, but manual sends still use `--cert`:
+6. For the current Rust CLI prototype, nearby discovery helps you find the receiver address, but manual sends still use `--cert` and `--source`:
 
 ```powershell
-cargo run -p transfer-core --bin ft-send -- send --to 192.168.1.25:5000 --file ./path/to/large-file.iso --cert ./receiver-cert.der --chunk-size 1048576 --parallelism 4
+cargo run -p transfer-core --bin ft-send -- send --to 192.168.1.25:5000 --source ./path/to/large-file.iso --cert ./receiver-cert.der --chunk-size 1048576 --parallelism 4
 ```
 
 7. If no receivers appear, make sure both devices are on the same LAN segment, local firewall rules allow mDNS and the QUIC port, and `ft-receive` is still running.
 
 ### Verification behavior
 
-- The sender computes the full-file SHA-256 before transfer and includes it in the transfer manifest.
+- The sender computes a SHA-256 for every transferred file before transfer and includes those hashes in the package manifest.
 - Each chunk stream also carries its own SHA-256 and the receiver verifies that hash before accepting the chunk.
-- After reconstruction, the receiver computes the SHA-256 of the final file and compares it against the manifest hash.
+- After reconstruction, the receiver computes the SHA-256 of each received file and compares it against the manifest entry for that relative path.
 - Any chunk-hash mismatch or final-file mismatch fails the transfer clearly; corrupted data is not accepted silently.
-- On success, the sender prints the expected SHA-256 and the receiver prints the verified SHA-256.
+- On success, the sender prints the package fingerprint and the receiver verifies every file before marking the package complete.
 
 ### Resume behavior
 
@@ -130,14 +130,14 @@ cargo run -p transfer-core --bin ft-send -- send --to 192.168.1.25:5000 --file .
 
 1. Start the receiver:
 
-```powershell
+`````powershell
 cargo run -p transfer-core --bin ft-receive -- --bind 0.0.0.0:5000 --output-dir ./received
-```
+`````
 
-2. Start sending a large file:
+2. Start sending a large file or folder package:
 
 ```powershell
-cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --file ./path/to/large-file.iso --cert ./.fasttransfer/certs/receiver-cert.der --chunk-size 1048576 --parallelism 4
+cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --source ./path/to/large-file.iso --cert ./.fasttransfer/certs/receiver-cert.der --chunk-size 1048576 --parallelism 4
 ```
 
 3. Interrupt either side before the transfer finishes.
@@ -146,7 +146,7 @@ cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --file ./pa
 
 5. Restart the sender with the same source file, certificate, chunk size, and parallelism.
 
-6. The restarted transfer should continue from the missing chunks only instead of retransmitting the whole file.
+6. The restarted transfer should continue from the missing chunks only instead of retransmitting the whole package.
 
 ### Mobile app
 
@@ -161,7 +161,8 @@ flutter create .
 
 The desktop shell now includes a minimal Tauri interface on top of the existing Rust transfer engine. It provides:
 
-- a native file picker for the source file
+- a native file picker for a single source file
+- a native folder picker for recursive package transfer
 - a nearby receivers list powered by the `discovery` crate
 - automatic LAN trust for discovered receivers with visible device identity checks
 - manual target entry as an advanced fallback
@@ -183,9 +184,10 @@ Default desktop LAN flow:
 1. Start the receiver on PC1 from the desktop app.
 2. On PC2, refresh nearby devices.
 3. Select PC1 from the nearby device list and confirm its device name, short fingerprint, and trust state.
-4. Pick a file and press Send.
-5. The sender automatically binds the discovered receiver certificate to that session and connects over QUIC/TLS without a manual certificate picker.
-6. If the receiver certificate changes later, the app marks the device as a fingerprint mismatch and blocks the discovered-device send path until you handle it deliberately.
+4. Pick a file or folder and review the package summary.
+5. Press Send.
+6. The sender automatically binds the discovered receiver certificate to that session and connects over QUIC/TLS without a manual certificate picker.
+7. If the receiver certificate changes later, the app marks the device as a fingerprint mismatch and blocks the discovered-device send path until you handle it deliberately.
 
 ### Control plane
 
@@ -204,6 +206,32 @@ go run .
 - `quic-transport`: QUIC transport wiring built on `quinn`.
 - `transfer-core`: chunk scheduling, resume orchestration, reassembly, integrity verification, progress reporting, and CLI binaries.
 
+## Folder Transfer Behavior
+
+- You can send either a single file or a whole folder from the CLI and the desktop app.
+- Folder transfers use paths relative to the selected root, never the sender''s absolute filesystem paths.
+- Empty directories are preserved and recreated on the receiver before any file chunks are written.
+- Progress is package-wide and reports total transferred bytes, completed files, and the current relative path being transferred.
+- Resume metadata is tracked for the full package, so interrupted folder transfers continue from missing chunks on restart.
+
+## Folder Transfer Test Flow
+
+1. Create a test folder with nested subfolders, several files, and at least one empty directory.
+2. Start the receiver:
+
+```powershell
+cargo run -p transfer-core --bin ft-receive -- --bind 0.0.0.0:5000 --output-dir ./received
+```
+
+3. Send the folder package:
+
+```powershell
+cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --source ./path/to/test-folder --cert ./.fasttransfer/certs/receiver-cert.der --chunk-size 1048576 --parallelism 4
+```
+
+4. Confirm that the receiver recreates the same folder tree under the output directory, including empty folders.
+5. Compare a few nested files and verify that the transfer completes with integrity verification.
+6. Interrupt and restart the same transfer to confirm resume continues from missing chunks only.
 ## Prototype Notes
 
 - Chunk size is configurable from the sender CLI with `--chunk-size`.
@@ -219,3 +247,5 @@ go run .
 2. Add retry windows and selective retransmission for chunks that were in flight during disconnects.
 3. Introduce relay negotiation for NAT traversal beyond the local network.
 4. Scaffold the Flutter and Tauri applications against the Rust core via FFI.
+
+

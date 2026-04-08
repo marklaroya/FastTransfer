@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use transfer_core::{
     assess_discovered_receiver, bind_receiver, ensure_preferred_receive_dir,
-    prepare_discovered_send_request, preferred_receive_dir_label, send_file_with_progress,
-    DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport, ReceiverTrustState, SendRequest,
-    TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE, DEFAULT_PARALLELISM,
+    inspect_transfer_source, prepare_discovered_send_request, preferred_receive_dir_label,
+    send_file_with_progress, DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport,
+    ReceiverTrustState, SendRequest, TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE,
+    DEFAULT_PARALLELISM,
 };
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
@@ -54,6 +55,9 @@ struct ProgressPayload {
     transferred_bytes: u64,
     percent: f64,
     average_mib_per_sec: f64,
+    completed_files: u64,
+    total_files: u64,
+    current_path: Option<String>,
     completed: bool,
 }
 
@@ -65,6 +69,9 @@ impl From<TransferProgress> for ProgressPayload {
             transferred_bytes: value.transferred_bytes,
             percent: value.percent_complete,
             average_mib_per_sec: value.average_mib_per_sec,
+            completed_files: value.completed_files,
+            total_files: value.total_files,
+            current_path: value.current_path,
             completed: value.completed,
         }
     }
@@ -78,6 +85,8 @@ struct TransferSummaryPayload {
     elapsed_secs: f64,
     average_mib_per_sec: f64,
     completed_chunks: u64,
+    completed_files: u64,
+    total_directories: u64,
     sha256_hex: String,
     integrity_verified: bool,
 }
@@ -90,12 +99,23 @@ impl From<TransferSummary> for TransferSummaryPayload {
             elapsed_secs: value.elapsed.as_secs_f64(),
             average_mib_per_sec: value.average_mib_per_sec,
             completed_chunks: value.completed_chunks,
+            completed_files: value.completed_files,
+            total_directories: value.total_directories,
             sha256_hex: value.sha256_hex,
             integrity_verified: value.integrity_verified,
         }
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackageSummaryPayload {
+    root_name: String,
+    root_kind: String,
+    total_files: u64,
+    total_directories: u64,
+    total_bytes: u64,
+}
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SendStatusPayload {
@@ -175,6 +195,37 @@ fn pick_source_file() -> Option<String> {
 }
 
 #[tauri::command]
+fn pick_source_folder() -> Option<String> {
+    FileDialog::new()
+        .set_title("Choose a folder to send")
+        .pick_folder()
+        .map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+fn pick_receive_folder() -> Option<String> {
+    FileDialog::new()
+        .set_title("Choose where received files should be saved")
+        .pick_folder()
+        .map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+async fn inspect_source(source_path: String) -> Result<PackageSummaryPayload, String> {
+    let source_path = PathBuf::from(source_path);
+    let summary = inspect_transfer_source(source_path.as_path())
+        .await
+        .map_err(format_error)?;
+    Ok(PackageSummaryPayload {
+        root_name: summary.root_name,
+        root_kind: format!("{:?}", summary.root_kind).to_lowercase(),
+        total_files: summary.total_files,
+        total_directories: summary.total_directories,
+        total_bytes: summary.total_bytes,
+    })
+}
+
+#[tauri::command]
 fn pick_certificate_file() -> Option<String> {
     FileDialog::new()
         .add_filter("DER certificate", &["der"])
@@ -222,6 +273,7 @@ async fn start_receiver(
     app: AppHandle,
     state: State<'_, DesktopState>,
     device_name: Option<String>,
+    output_dir: Option<String>,
 ) -> Result<ReceiverStartPayload, String> {
     let running = Arc::clone(&state.receiver_running);
     if running.swap(true, Ordering::SeqCst) {
@@ -233,7 +285,10 @@ async fn start_receiver(
         .map_err(|error| format!("invalid default bind address: {error}"))?;
     let runtime_dir = desktop_runtime_dir().map_err(format_error)?;
     let cert_dir = runtime_dir.join("certs");
-    let output_dir = ensure_preferred_receive_dir().map_err(format_error)?;
+    let output_dir = match output_dir.filter(|value| !value.trim().is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => ensure_preferred_receive_dir().map_err(format_error)?,
+    };
     let output_dir_label = preferred_receive_dir_label(&output_dir);
     std::fs::create_dir_all(&cert_dir).map_err(format_error)?;
 
@@ -583,7 +638,10 @@ fn main() {
         .manage(DesktopState::default())
         .invoke_handler(tauri::generate_handler![
             pick_source_file,
+            pick_source_folder,
+            inspect_source,
             pick_certificate_file,
+            pick_receive_folder,
             discover_nearby_receivers,
             start_receiver,
             start_send
@@ -591,4 +649,6 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+
+
 

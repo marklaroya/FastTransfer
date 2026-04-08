@@ -3048,6 +3048,8 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "integrity",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
