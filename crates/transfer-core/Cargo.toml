@@ -11,6 +11,7 @@ anyhow.workspace = true
 chunker.workspace = true
 clap.workspace = true
 discovery.workspace = true
+dirs.workspace = true
 integrity.workspace = true
 protocol.workspace = true
 quic-transport.workspace = true

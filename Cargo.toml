@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 members = [
     "crates/protocol",
     "crates/chunker",
@@ -24,6 +24,7 @@ base64 = "0.22.1"
 chunker = { path = "crates/chunker" }
 clap = { version = "4.5.30", features = ["derive"] }
 discovery = { path = "crates/discovery" }
+dirs = "5.0.1"
 integrity = { path = "crates/integrity" }
 mdns-sd = "0.18.2"
 protocol = { path = "crates/protocol" }

@@ -193,8 +193,12 @@ function applyReceiverStatus(payload) {
   else setBadge(elements.receiverBadge, "Idle", "idle");
 
   if (payload.bindAddr) elements.receiverBind.textContent = payload.bindAddr;
-  if (payload.outputDir) elements.receiverOutput.textContent = payload.outputDir;
-  if (payload.savedPath) elements.receiverSavedPath.textContent = payload.savedPath;
+  if (payload.outputDirLabel || payload.outputDir) {
+    elements.receiverOutput.textContent = payload.outputDirLabel ?? payload.outputDir;
+  }
+  if (payload.savedPathLabel || payload.savedPath) {
+    elements.receiverSavedPath.textContent = payload.savedPathLabel ?? payload.savedPath;
+  }
   if (payload.summary) elements.receiverFile.textContent = payload.summary.fileName;
   if (payload.progress) applyProgress(elements.receiverProgressBar, elements.receiverProgressText, elements.receiverSpeed, payload.progress);
 }
@@ -219,7 +223,13 @@ async function refreshDevices() {
 async function startReceiver() {
   try {
     const response = await invoke("start_receiver", { deviceName: elements.deviceName.value.trim() || null });
-    applyReceiverStatus({ state: "starting", message: `Preparing receiver on ${response.bindAddr}`, bindAddr: response.bindAddr, outputDir: response.outputDir });
+    applyReceiverStatus({
+      state: "starting",
+      message: `Preparing receiver on ${response.bindAddr}`,
+      bindAddr: response.bindAddr,
+      outputDir: response.outputDir,
+      outputDirLabel: response.outputDirLabel,
+    });
   } catch (error) {
     applyReceiverStatus({ state: "error", message: `${error}` });
   }

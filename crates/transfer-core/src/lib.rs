@@ -581,6 +581,55 @@ fn sender_checkpoint_base_dir(source_path: &Path) -> &Path {
     source_path.parent().unwrap_or_else(|| Path::new("."))
 }
 
+pub fn ensure_preferred_receive_dir() -> Result<PathBuf> {
+    let directory = preferred_receive_dir()?;
+    stdfs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create receive directory {}", directory.display()))?;
+    Ok(directory)
+}
+
+pub fn preferred_receive_dir_label(path: &Path) -> String {
+    if let Some(downloads_dir) = dirs::download_dir() {
+        if let Ok(relative) = path.strip_prefix(&downloads_dir) {
+            return join_display_label("Downloads", relative);
+        }
+    }
+
+    if let Some(desktop_dir) = dirs::desktop_dir() {
+        if let Ok(relative) = path.strip_prefix(&desktop_dir) {
+            return join_display_label("Desktop", relative);
+        }
+    }
+
+    path.display().to_string()
+}
+
+fn preferred_receive_dir() -> Result<PathBuf> {
+    if let Some(downloads_dir) = dirs::download_dir() {
+        return Ok(downloads_dir.join("FastTransfer"));
+    }
+
+    if let Some(desktop_dir) = dirs::desktop_dir() {
+        return Ok(desktop_dir.join("FastTransfer"));
+    }
+
+    bail!("failed to resolve a Downloads or Desktop directory for received files")
+}
+
+fn join_display_label(root: &str, relative: &Path) -> String {
+    let suffix = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    if suffix.is_empty() {
+        root.to_owned()
+    } else {
+        format!("{root}/{suffix}")
+    }
+}
+
 fn trust_cache_file(trust_cache_dir: &Path, peer_id: &str) -> PathBuf {
     trust_cache_dir.join("receivers").join(format!("{}.trust", sanitize_id(peer_id)))
 }

@@ -17,10 +17,10 @@ use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use transfer_core::{
-    assess_discovered_receiver, bind_receiver, prepare_discovered_send_request,
-    send_file_with_progress, DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport,
-    ReceiverTrustState, SendRequest, TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE,
-    DEFAULT_PARALLELISM,
+    assess_discovered_receiver, bind_receiver, ensure_preferred_receive_dir,
+    prepare_discovered_send_request, preferred_receive_dir_label, send_file_with_progress,
+    DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport, ReceiverTrustState, SendRequest,
+    TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE, DEFAULT_PARALLELISM,
 };
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
@@ -112,9 +112,11 @@ struct ReceiverStatusPayload {
     message: String,
     bind_addr: Option<String>,
     output_dir: Option<String>,
+    output_dir_label: Option<String>,
     progress: Option<ProgressPayload>,
     summary: Option<TransferSummaryPayload>,
     saved_path: Option<String>,
+    saved_path_label: Option<String>,
     remote_address: Option<String>,
     certificate_path: Option<String>,
 }
@@ -124,6 +126,7 @@ struct ReceiverStatusPayload {
 struct ReceiverStartPayload {
     bind_addr: String,
     output_dir: String,
+    output_dir_label: String,
     certificate_path: String,
 }
 
@@ -230,9 +233,9 @@ async fn start_receiver(
         .map_err(|error| format!("invalid default bind address: {error}"))?;
     let runtime_dir = desktop_runtime_dir().map_err(format_error)?;
     let cert_dir = runtime_dir.join("certs");
-    let output_dir = runtime_dir.join("received");
+    let output_dir = ensure_preferred_receive_dir().map_err(format_error)?;
+    let output_dir_label = preferred_receive_dir_label(&output_dir);
     std::fs::create_dir_all(&cert_dir).map_err(format_error)?;
-    std::fs::create_dir_all(&output_dir).map_err(format_error)?;
 
     let request = ReceiveRequest {
         bind_addr,
@@ -250,6 +253,7 @@ async fn start_receiver(
     let request_for_task = request.clone();
     let advertised_name_for_task = advertised_name.clone();
     let output_dir_for_task = output_dir.clone();
+    let output_dir_label_for_task = output_dir_label.clone();
     let certificate_path_for_task = certificate_path.clone();
 
     tauri::async_runtime::spawn(async move {
@@ -261,9 +265,11 @@ async fn start_receiver(
                     message: format!("Preparing receiver for {advertised_name_for_task}..."),
                     bind_addr: Some(bind_addr.to_string()),
                     output_dir: Some(output_dir_for_task.display().to_string()),
+                    output_dir_label: Some(output_dir_label_for_task.clone()),
                     progress: None,
                     summary: None,
                     saved_path: None,
+                    saved_path_label: None,
                     remote_address: None,
                     certificate_path: Some(certificate_path_for_task.clone()),
                 },
@@ -281,14 +287,16 @@ async fn start_receiver(
                 ReceiverStatusPayload {
                     state: "listening".to_owned(),
                     message: format!(
-                        "Listening on {} and advertising as {} with automatic LAN trust.",
-                        ready.bind_addr, advertised_name_for_task
+                        "Listening on {} and advertising as {} with automatic LAN trust. Incoming files go to {}.",
+                        ready.bind_addr, advertised_name_for_task, output_dir_label_for_task
                     ),
                     bind_addr: Some(ready.bind_addr.to_string()),
                     output_dir: Some(output_dir_for_task.display().to_string()),
+                    output_dir_label: Some(output_dir_label_for_task.clone()),
                     progress: None,
                     summary: None,
                     saved_path: None,
+                    saved_path_label: None,
                     remote_address: None,
                     certificate_path: Some(ready.cert_path.display().to_string()),
                 },
@@ -298,6 +306,7 @@ async fn start_receiver(
             let cert_path_for_progress = request_for_task.cert_path.display().to_string();
             let bind_addr_for_progress = ready.bind_addr.to_string();
             let output_dir_for_progress = output_dir_for_task.display().to_string();
+            let output_dir_label_for_progress = output_dir_label_for_task.clone();
             let received = receiver
                 .receive_once_with_progress(move |progress| {
                     emit_receiver_status(
@@ -307,9 +316,11 @@ async fn start_receiver(
                             message: progress.label.clone(),
                             bind_addr: Some(bind_addr_for_progress.clone()),
                             output_dir: Some(output_dir_for_progress.clone()),
+                            output_dir_label: Some(output_dir_label_for_progress.clone()),
                             progress: Some(progress.into()),
                             summary: None,
                             saved_path: None,
+                            saved_path_label: None,
                             remote_address: None,
                             certificate_path: Some(cert_path_for_progress.clone()),
                         },
@@ -324,9 +335,11 @@ async fn start_receiver(
                     message: format!("Saved {} from {}.", received.summary.file_name, received.remote_address),
                     bind_addr: Some(ready.bind_addr.to_string()),
                     output_dir: Some(output_dir_for_task.display().to_string()),
+                    output_dir_label: Some(output_dir_label_for_task.clone()),
                     progress: None,
                     summary: Some(received.summary.into()),
                     saved_path: Some(received.saved_path.display().to_string()),
+                    saved_path_label: Some(preferred_receive_dir_label(&received.saved_path)),
                     remote_address: Some(received.remote_address.to_string()),
                     certificate_path: Some(ready.cert_path.display().to_string()),
                 },
@@ -344,9 +357,11 @@ async fn start_receiver(
                     message: format!("Receiver failed: {error:#}"),
                     bind_addr: Some(bind_addr.to_string()),
                     output_dir: Some(output_dir_for_task.display().to_string()),
+                    output_dir_label: Some(output_dir_label_for_task.clone()),
                     progress: None,
                     summary: None,
                     saved_path: None,
+                    saved_path_label: None,
                     remote_address: None,
                     certificate_path: Some(certificate_path_for_task.clone()),
                 },
@@ -359,6 +374,7 @@ async fn start_receiver(
     Ok(ReceiverStartPayload {
         bind_addr: bind_addr.to_string(),
         output_dir: output_dir.display().to_string(),
+        output_dir_label,
         certificate_path,
     })
 }

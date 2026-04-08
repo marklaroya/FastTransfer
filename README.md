@@ -1,4 +1,4 @@
-﻿# FastTransfer Monorepo
+# FastTransfer Monorepo
 
 FastTransfer is a P2P-first cross-platform file transfer system focused on high-throughput, resumable, integrity-checked transfers across Android, iOS, and desktop platforms.
 
@@ -176,7 +176,7 @@ npm install
 npm run tauri dev
 ```
 
-During local development, the desktop app stores receiver certificates, trust-on-first-use records, and received files under `apps/desktop/.fasttransfer-desktop/`.
+During local development, the desktop app stores receiver certificates and trust-on-first-use records under `apps/desktop/.fasttransfer-desktop/`. Received files go to `Downloads/FastTransfer` by default, with an automatic fallback to `Desktop/FastTransfer` when Downloads is unavailable.
 
 Default desktop LAN flow:
 
