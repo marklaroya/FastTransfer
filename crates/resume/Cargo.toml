@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "resume"
 description = "Resume state management for FastTransfer."
 edition.workspace = true
@@ -7,6 +7,8 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 integrity.workspace = true
 protocol.workspace = true
 

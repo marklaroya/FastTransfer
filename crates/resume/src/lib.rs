@@ -10,6 +10,9 @@ use std::{
 use integrity::{format_sha256, Sha256Hash, SHA256_LEN};
 use protocol::{PackageItemKind, TransferManifest, TransferSession};
 
+mod streaming;
+pub use streaming::*;
+
 const CHECKPOINT_VERSION: &str = "2";
 
 /// Tracks completed chunks for a resumable transfer session.
@@ -424,3 +427,4 @@ mod tests {
         fs::remove_dir_all(&temp_root).expect("temp directory should be cleaned up");
     }
 }
+

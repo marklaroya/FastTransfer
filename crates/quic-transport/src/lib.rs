@@ -441,3 +441,119 @@ async fn read_manifest_from_stream(stream: &mut RecvStream) -> Result<TransferMa
 }
 
 
+
+/// Sender-side control channel for streaming package metadata and results.
+#[derive(Debug)]
+pub struct StreamingSenderControlStream {
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl StreamingSenderControlStream {
+    /// Sends a streaming sender-control message.
+    pub async fn send_message(&mut self, message: &protocol::SenderControlMessage) -> Result<()> {
+        let encoded = message
+            .encode()
+            .context("failed to encode streaming sender control message")?;
+        self.send
+            .write_all(&encoded)
+            .await
+            .context("failed to write streaming sender control message")
+    }
+
+    /// Reads a streaming receiver-control message.
+    pub async fn read_message(&mut self) -> Result<protocol::ReceiverControlMessage> {
+        let frame = read_stream_control_frame(&mut self.recv).await?;
+        protocol::ReceiverControlMessage::decode(&frame)
+            .context("failed to decode streaming receiver control message")
+    }
+
+    /// Finishes the streaming control channel after the transfer completes.
+    pub fn finish(&mut self) -> Result<()> {
+        self.send
+            .finish()
+            .context("failed to finish sender streaming control stream")
+    }
+}
+
+/// Receiver-side control channel for streaming package metadata and results.
+#[derive(Debug)]
+pub struct StreamingReceiverControlStream {
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl StreamingReceiverControlStream {
+    /// Reads a streaming sender-control message.
+    pub async fn read_message(&mut self) -> Result<protocol::SenderControlMessage> {
+        let frame = read_stream_control_frame(&mut self.recv).await?;
+        protocol::SenderControlMessage::decode(&frame)
+            .context("failed to decode streaming sender control message")
+    }
+
+    /// Sends a streaming receiver-control message.
+    pub async fn send_message(&mut self, message: &protocol::ReceiverControlMessage) -> Result<()> {
+        let encoded = message
+            .encode()
+            .context("failed to encode streaming receiver control message")?;
+        self.send
+            .write_all(&encoded)
+            .await
+            .context("failed to write streaming receiver control message")
+    }
+
+    /// Finishes the receiver control stream.
+    pub fn finish(&mut self) -> Result<()> {
+        self.send
+            .finish()
+            .context("failed to finish receiver streaming control stream")
+    }
+}
+
+impl QuicSender {
+    /// Opens a bidirectional control stream used by the progressive streaming pipeline.
+    pub async fn open_streaming_control_stream(&self) -> Result<StreamingSenderControlStream> {
+        let (send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .context("failed to open QUIC streaming control stream")?;
+        Ok(StreamingSenderControlStream { send, recv })
+    }
+}
+
+impl IncomingConnection {
+    /// Accepts the bidirectional control stream used by the progressive streaming pipeline.
+    pub async fn accept_streaming_control_stream(&self) -> Result<StreamingReceiverControlStream> {
+        let (send, recv) = self
+            .connection
+            .accept_bi()
+            .await
+            .context("sender closed before opening the streaming control stream")?;
+        Ok(StreamingReceiverControlStream { send, recv })
+    }
+}
+
+async fn read_stream_control_frame(stream: &mut RecvStream) -> Result<Vec<u8>> {
+    let mut header = [0_u8; protocol::STREAM_CONTROL_HEADER_LEN];
+    stream
+        .read_exact(&mut header)
+        .await
+        .context("failed to read streaming control frame header")?;
+
+    let mut len_bytes = [0_u8; 4];
+    len_bytes.copy_from_slice(&header[4..8]);
+    let payload_len = u32::from_le_bytes(len_bytes) as usize;
+    let mut payload = vec![0_u8; payload_len];
+    if payload_len > 0 {
+        stream
+            .read_exact(&mut payload)
+            .await
+            .context("failed to read streaming control frame payload")?;
+    }
+
+    let mut frame = Vec::with_capacity(protocol::STREAM_CONTROL_HEADER_LEN + payload_len);
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}

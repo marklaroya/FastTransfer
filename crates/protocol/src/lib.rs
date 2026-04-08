@@ -1,9 +1,12 @@
-//! Shared protocol primitives used across the FastTransfer engine.
+﻿//! Shared protocol primitives used across the FastTransfer engine.
 
 use std::fmt;
 
 use integrity::{sha256_bytes, Sha256Hash, SHA256_LEN};
 use serde::{Deserialize, Serialize};
+
+mod streaming;
+pub use streaming::*;
 
 /// Current protocol version for wire compatibility checks.
 pub const PROTOCOL_VERSION: u16 = 2;
@@ -618,3 +621,4 @@ mod tests {
         assert_eq!(TransferStatus::decode(&status_frame).expect("status should decode"), status);
     }
 }
+

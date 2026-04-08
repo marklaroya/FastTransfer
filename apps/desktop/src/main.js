@@ -1,4 +1,4 @@
-ï»¿
+
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -237,6 +237,7 @@ function packageKindBadgeLabel(rootKind) {
 
 function stateLabel(state) {
   if (state === "starting") return "Starting";
+  if (state === "scanning") return "Scanning";
   if (state === "sending") return "Sending";
   if (state === "receiving") return "Receiving";
   if (state === "completed") return "Completed";
@@ -250,14 +251,14 @@ function stateLabel(state) {
 function stateKind(state) {
   if (state === "completed") return "success";
   if (state === "error") return "error";
-  if (["starting", "sending", "receiving", "listening", "stopping"].includes(state)) return "active";
+  if (["starting", "scanning", "sending", "receiving", "listening", "stopping"].includes(state)) return "active";
   return "idle";
 }
 
 function statusChipClass(status) {
   const lower = String(status).toLowerCase();
   if (lower.includes("complete")) return "complete";
-  if (["sending", "receiving", "listening", "starting", "stopping"].includes(lower)) return lower;
+  if (["scanning", "sending", "receiving", "listening", "starting", "stopping"].includes(lower)) return lower;
   if (["queued", "idle"].includes(lower)) return lower;
   return "error";
 }
@@ -341,7 +342,7 @@ function renderPackageSummary() {
   elements.packageSummaryMessage.textContent = `Ready to send ${summary.rootName} with ${Number(summary.totalFiles).toLocaleString()} file${Number(summary.totalFiles) === 1 ? "" : "s"}.`;
   if (!appState.sendBusy) {
     elements.sendSummaryFile.textContent = summary.rootName;
-    elements.sendSummaryMeta.textContent = `${formatBytes(summary.totalBytes)} â€¢ ${packageKindLabel(summary.rootKind)}`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(summary.totalBytes)} • ${packageKindLabel(summary.rootKind)}`;
   }
 }
 
@@ -508,7 +509,7 @@ function renderDeviceLists() {
           <div class="trusted-item">
             <strong>${escapeHtml(device.deviceName)}</strong>
             <span>${escapeHtml(trustLabel(device.trustState))}</span>
-            <span>${escapeHtml(device.shortFingerprint)} â€¢ ${escapeHtml(device.addresses[0] ?? "No address")}</span>
+            <span>${escapeHtml(device.shortFingerprint)} • ${escapeHtml(device.addresses[0] ?? "No address")}</span>
           </div>
         `,
       )
@@ -698,7 +699,7 @@ function updateStatusBar() {
     ? `Receiver listening on ${appState.receiverBindAddr}`
     : "Receiver stopped";
   elements.statusRight.textContent = activeProgress
-    ? `${activeProgress.status} â€¢ ${activeProgress.speed}`
+    ? `${activeProgress.status} • ${activeProgress.speed}`
     : (elements.manualMode.checked ? (elements.targetAddress.value.trim() || "Manual target") : (selectedDevice()?.deviceName || "No target selected"));
 }
 
@@ -844,7 +845,7 @@ function applyProgress(bar, textNode, speedNode, progress) {
 
 function applySendStatus(payload) {
   const state = payload.state ?? "idle";
-  appState.sendBusy = ["starting", "sending"].includes(state);
+  appState.sendBusy = ["starting", "scanning", "sending"].includes(state);
   appState.sendMessage = payload.message ?? "Ready.";
 
   elements.sendButton.disabled = appState.sendBusy;
@@ -854,15 +855,15 @@ function applySendStatus(payload) {
   if (payload.progress) {
     applyProgress(elements.sendProgressBar, elements.sendProgressText, elements.sendSpeed, payload.progress);
     elements.sendSummaryFile.textContent = appState.sourceSummary?.rootName ?? basename(elements.sourcePath.value) ?? "Outgoing package";
-    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} â€¢ ${selectedDevice()?.deviceName ?? (elements.targetAddress.value.trim() || "Manual target")}`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} • ${selectedDevice()?.deviceName ?? (elements.targetAddress.value.trim() || "Manual target")}`;
     elements.sendSummaryBytes.textContent = `${formatBytes(payload.progress.transferredBytes)} / ${formatBytes(payload.progress.totalBytes)}`;
     elements.sendSummaryChunks.textContent = `${payload.progress.completedFiles} / ${payload.progress.totalFiles}`;
-    elements.sendSummaryHash.textContent = payload.progress.currentPath || "Preparing files";
+    elements.sendSummaryHash.textContent = payload.progress.currentPath || (payload.progress.phase === "scanning" ? "Scanning files..." : "Preparing files");
   }
 
   if (payload.summary) {
     elements.sendSummaryFile.textContent = payload.summary.fileName;
-    elements.sendSummaryMeta.textContent = `${formatBytes(payload.summary.bytesTransferred)} â€¢ ${payload.summary.elapsedSecs.toFixed(1)}s`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.summary.bytesTransferred)} • ${payload.summary.elapsedSecs.toFixed(1)}s`;
     elements.sendSummaryBytes.textContent = formatBytes(payload.summary.bytesTransferred);
     elements.sendSummaryChunks.textContent = `${payload.summary.completedFiles} file${payload.summary.completedFiles === 1 ? "" : "s"}`;
     elements.sendSummaryHash.textContent = payload.summary.integrityVerified ? "Verified" : payload.summary.sha256Hex;
@@ -879,7 +880,7 @@ function applySendStatus(payload) {
     ? elements.targetAddress.value.trim() || "Manual target"
     : selectedDevice()?.deviceName || "Nearby device";
 
-  if (["starting", "sending", "completed", "error"].includes(state)) {
+  if (["starting", "scanning", "sending", "completed", "error"].includes(state)) {
     const id = ensureTransfer("currentSendTransferId", "Send", transferKind, transferName, destination);
     updateTransfer(id, {
       name: transferName,
@@ -1071,5 +1072,8 @@ bootstrap().catch((error) => {
   applySendStatus({ state: "error", message: `App bootstrap failed: ${error}` });
   applyReceiverStatus({ state: "error", message: `App bootstrap failed: ${error}` });
 });
+
+
+
 
 

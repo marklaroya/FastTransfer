@@ -50,7 +50,7 @@ cargo check --workspace
 
 ### Desktop-to-desktop QUIC prototype
 
-The prototype is implemented with `quinn` and lives in the Rust workspace. A transfer source can be either a single file or a whole folder. Folder transfers are scanned recursively, split into configurable chunks, sent over multiple QUIC streams in parallel, and reassembled on the receiver with the original relative paths preserved.
+The prototype is implemented with `quinn` and lives in the Rust workspace. A transfer source can be either a single file or a whole folder. Folder transfers now use a streaming pipeline: the sender scans recursively, emits metadata as items are discovered, and starts sending file chunks immediately instead of waiting for a full precomputed manifest. Files are chunked with configurable size, sent over multiple QUIC streams in parallel, and reassembled on the receiver with original relative paths preserved.
 
 Start the receiver in one terminal:
 
@@ -112,7 +112,7 @@ cargo run -p transfer-core --bin ft-send -- send --to 192.168.1.25:5000 --source
 
 ### Verification behavior
 
-- The sender computes a SHA-256 for every transferred file before transfer and includes those hashes in the package manifest.
+- The sender computes a SHA-256 for each file lazily right before that file is sent and includes the expected hash in the streamed file metadata.
 - Each chunk stream also carries its own SHA-256 and the receiver verifies that hash before accepting the chunk.
 - After reconstruction, the receiver computes the SHA-256 of each received file and compares it against the manifest entry for that relative path.
 - Any chunk-hash mismatch or final-file mismatch fails the transfer clearly; corrupted data is not accepted silently.
@@ -120,10 +120,10 @@ cargo run -p transfer-core --bin ft-send -- send --to 192.168.1.25:5000 --source
 
 ### Resume behavior
 
-- Both sender and receiver persist chunk-completion checkpoints under a local `.fasttransfer/resume/` directory.
-- When a transfer restarts, the receiver loads its checkpoint, validates the manifest metadata, and tells the sender which chunks are still missing.
-- The sender then sends only the missing chunks and skips the chunks that were already completed.
-- If a saved checkpoint does not match the new manifest metadata, the transfer fails safely instead of reusing incompatible partial state.
+- Both sender and receiver persist streaming checkpoints under `.fasttransfer/resume-streaming/` (inside their local `.fasttransfer` state directory).
+- When a transfer restarts, the receiver loads its checkpoint, validates streaming metadata, and tells the sender whether each discovered file is still needed.
+- The sender skips files already marked complete and sends only the missing files; this is best-effort resume at file granularity for the current MVP.
+- If a saved checkpoint does not match the new streaming metadata, the transfer fails safely instead of reusing incompatible partial state.
 - Checkpoints are removed automatically after a successful verified transfer.
 
 ### Resume test flow
@@ -212,7 +212,7 @@ go run .
 - Folder transfers use paths relative to the selected root, never the sender''s absolute filesystem paths.
 - Empty directories are preserved and recreated on the receiver before any file chunks are written.
 - Progress is package-wide and reports total transferred bytes, completed files, and the current relative path being transferred.
-- Resume metadata is tracked for the full package, so interrupted folder transfers continue from missing chunks on restart.
+- Resume metadata is tracked for the full package, and interrupted folder transfers continue from missing files on restart (partial files may be resent in this MVP).
 
 ## Folder Transfer Test Flow
 
@@ -247,5 +247,6 @@ cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --source ./
 2. Add retry windows and selective retransmission for chunks that were in flight during disconnects.
 3. Introduce relay negotiation for NAT traversal beyond the local network.
 4. Scaffold the Flutter and Tauri applications against the Rust core via FFI.
+
 
 

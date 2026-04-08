@@ -53,6 +53,7 @@ struct ReceiverListItem {
 #[serde(rename_all = "camelCase")]
 struct ProgressPayload {
     label: String,
+    phase: String,
     total_bytes: u64,
     transferred_bytes: u64,
     percent: f64,
@@ -67,6 +68,7 @@ impl From<TransferProgress> for ProgressPayload {
     fn from(value: TransferProgress) -> Self {
         Self {
             label: value.label,
+            phase: value.phase,
             total_bytes: value.total_bytes,
             transferred_bytes: value.transferred_bytes,
             percent: value.percent_complete,
@@ -593,12 +595,19 @@ async fn run_send_task(
     let app_for_progress = app_handle.clone();
     let progress_report = trust_report.clone();
     let result = send_file_with_progress(send_request, move |progress| {
+        let progress_payload: ProgressPayload = progress.into();
+        let state = if progress_payload.phase == "scanning" {
+            "scanning"
+        } else {
+            "sending"
+        };
+
         emit_send_status(
             &app_for_progress,
             SendStatusPayload {
-                state: "sending".to_owned(),
-                message: send_progress_message(progress_report.as_ref()),
-                progress: Some(progress.into()),
+                state: state.to_owned(),
+                message: send_progress_message(progress_report.as_ref(), &progress_payload.phase),
+                progress: Some(progress_payload),
                 summary: None,
             },
         );
@@ -639,15 +648,22 @@ fn send_start_message(target_addr: &str, trust_report: Option<&ReceiverTrustRepo
     }
 }
 
-fn send_progress_message(trust_report: Option<&ReceiverTrustReport>) -> String {
+fn send_progress_message(trust_report: Option<&ReceiverTrustReport>, phase: &str) -> String {
+    let action = if phase == "scanning" {
+        "Scanning and preparing files"
+    } else {
+        "Sending"
+    };
+
     match trust_report {
         Some(report) => format!(
-            "Sending to {} ({}) with {}.",
+            "{} to {} ({}) with {}.",
+            action,
             report.device_name,
             report.short_fingerprint,
             trust_state_label(report.state)
         ),
-        None => "Sending via manual target mode.".to_owned(),
+        None => format!("{} via manual target mode.", action),
     }
 }
 
@@ -707,6 +723,9 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+
+
+
 
 
 

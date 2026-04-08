@@ -1,4 +1,4 @@
-﻿//! Terminal progress reporting helpers for streaming transfers.
+﻿//! Terminal progress reporting helpers for transfer progress updates.
 
 use std::{
     io::{self, Write},
@@ -14,6 +14,8 @@ pub type ProgressListener = Arc<dyn Fn(ProgressUpdate) + Send + Sync + 'static>;
 pub struct ProgressUpdate {
     /// Human-readable transfer label.
     pub label: String,
+    /// Current transfer phase such as `scanning` or `sending`.
+    pub phase: String,
     /// Total number of bytes expected for the transfer.
     pub total_bytes: u64,
     /// Total number of bytes confirmed so far.
@@ -24,7 +26,7 @@ pub struct ProgressUpdate {
     pub average_mib_per_sec: f64,
     /// Number of files completed so far.
     pub completed_files: u64,
-    /// Total number of files in the package.
+    /// Total number of files discovered for the package.
     pub total_files: u64,
     /// Current relative file path being processed, when available.
     pub current_path: Option<String>,
@@ -46,6 +48,7 @@ pub struct ProgressSnapshot {
 /// Lightweight progress renderer for terminal-based transfers.
 pub struct ProgressReporter {
     label: String,
+    phase: String,
     total_bytes: u64,
     transferred_bytes: u64,
     total_files: u64,
@@ -63,6 +66,7 @@ impl ProgressReporter {
         let now = Instant::now();
         Self {
             label: label.into(),
+            phase: "sending".to_owned(),
             total_bytes,
             transferred_bytes: 0,
             total_files,
@@ -85,6 +89,20 @@ impl ProgressReporter {
     pub fn without_terminal(mut self) -> Self {
         self.render_terminal = false;
         self
+    }
+
+    /// Updates the current transfer phase and emits a progress snapshot.
+    pub fn set_phase(&mut self, phase: impl Into<String>) {
+        self.phase = phase.into();
+        self.emit(false);
+    }
+
+    /// Updates discovered transfer totals and emits a progress snapshot.
+    pub fn set_totals(&mut self, total_bytes: u64, total_files: u64) {
+        self.total_bytes = total_bytes;
+        self.total_files = total_files;
+        self.completed_files = self.completed_files.min(self.total_files);
+        self.emit(false);
     }
 
     /// Updates the current file path and label context.
@@ -134,6 +152,7 @@ impl ProgressReporter {
         if let Some(listener) = &self.listener {
             listener(ProgressUpdate {
                 label: self.label.clone(),
+                phase: self.phase.clone(),
                 total_bytes: self.total_bytes,
                 transferred_bytes: self.transferred_bytes,
                 percent_complete: percent_complete(self.transferred_bytes, self.total_bytes),
@@ -157,8 +176,9 @@ impl ProgressReporter {
         let current_path = self.current_path.as_deref().unwrap_or("preparing package");
 
         print!(
-            "\r{}: {:>6.2}% at {:>8.2} MiB/s [{} / {} files] {}",
+            "\r{} [{}]: {:>6.2}% at {:>8.2} MiB/s [{} / {} files] {}",
             self.label,
+            self.phase,
             percent,
             speed,
             self.completed_files,
