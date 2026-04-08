@@ -16,6 +16,7 @@ use discovery::{advertise_receiver, default_device_name, discover_receivers, Nea
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::oneshot;
 use transfer_core::{
     assess_discovered_receiver, bind_receiver, ensure_preferred_receive_dir,
     inspect_transfer_source, prepare_discovered_send_request, preferred_receive_dir_label,
@@ -31,6 +32,7 @@ const DEFAULT_SERVER_NAME: &str = "fasttransfer.local";
 struct DesktopState {
     sender_running: Arc<AtomicBool>,
     receiver_running: Arc<AtomicBool>,
+    receiver_stop: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     discovered_receivers: Mutex<HashMap<String, NearbyReceiver>>,
 }
 
@@ -276,6 +278,7 @@ async fn start_receiver(
     output_dir: Option<String>,
 ) -> Result<ReceiverStartPayload, String> {
     let running = Arc::clone(&state.receiver_running);
+    let stop_handle = Arc::clone(&state.receiver_stop);
     if running.swap(true, Ordering::SeqCst) {
         return Err("The receiver is already running.".to_owned());
     }
@@ -303,8 +306,17 @@ async fn start_receiver(
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(default_device_name);
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    {
+        let mut stop_slot = stop_handle
+            .lock()
+            .map_err(|_| "failed to prepare the receiver stop handle".to_owned())?;
+        *stop_slot = Some(stop_tx);
+    }
+
     let app_handle = app.clone();
     let running_for_task = Arc::clone(&running);
+    let stop_handle_for_task = Arc::clone(&stop_handle);
     let request_for_task = request.clone();
     let advertised_name_for_task = advertised_name.clone();
     let output_dir_for_task = output_dir.clone();
@@ -312,7 +324,7 @@ async fn start_receiver(
     let certificate_path_for_task = certificate_path.clone();
 
     tauri::async_runtime::spawn(async move {
-        let result = async {
+        let receiver_task = async {
             emit_receiver_status(
                 &app_handle,
                 ReceiverStatusPayload {
@@ -401,8 +413,30 @@ async fn start_receiver(
             );
 
             Ok::<(), anyhow::Error>(())
-        }
-        .await;
+        };
+
+        let result = tokio::select! {
+            _ = &mut stop_rx => {
+                emit_receiver_status(
+                    &app_handle,
+                    ReceiverStatusPayload {
+                        state: "stopped".to_owned(),
+                        message: format!("Receiver stopped. Files stay in {}.", output_dir_label_for_task),
+                        bind_addr: Some(bind_addr.to_string()),
+                        output_dir: Some(output_dir_for_task.display().to_string()),
+                        output_dir_label: Some(output_dir_label_for_task.clone()),
+                        progress: None,
+                        summary: None,
+                        saved_path: None,
+                        saved_path_label: None,
+                        remote_address: None,
+                        certificate_path: Some(certificate_path_for_task.clone()),
+                    },
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            result = receiver_task => result,
+        };
 
         if let Err(error) = result {
             emit_receiver_status(
@@ -423,6 +457,9 @@ async fn start_receiver(
             );
         }
 
+        if let Ok(mut stop_slot) = stop_handle_for_task.lock() {
+            *stop_slot = None;
+        }
         running_for_task.store(false, Ordering::SeqCst);
     });
 
@@ -432,6 +469,26 @@ async fn start_receiver(
         output_dir_label,
         certificate_path,
     })
+}
+
+#[tauri::command]
+fn stop_receiver(state: State<'_, DesktopState>) -> Result<(), String> {
+    let sender = state
+        .receiver_stop
+        .lock()
+        .map_err(|_| "failed to access the receiver stop handle".to_owned())?
+        .take();
+
+    match sender {
+        Some(sender) => {
+            let _ = sender.send(());
+            Ok(())
+        }
+        None if state.receiver_running.load(Ordering::SeqCst) => {
+            Err("Receiver shutdown is already in progress.".to_owned())
+        }
+        None => Err("The receiver is not running.".to_owned()),
+    }
 }
 
 #[tauri::command]
@@ -644,11 +701,13 @@ fn main() {
             pick_receive_folder,
             discover_nearby_receivers,
             start_receiver,
+            stop_receiver,
             start_send
         ])
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+
 
 
 

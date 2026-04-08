@@ -1141,6 +1141,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
  "transfer-core",
 ]
 

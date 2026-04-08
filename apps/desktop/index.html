@@ -8,224 +8,393 @@
     <script type="module" src="./src/main.js"></script>
   </head>
   <body>
-    <main class="app-shell">
-      <section class="app-frame">
-        <article class="panel sender-panel">
-          <div class="panel-heading compact-heading">
-            <div>
-              <p class="panel-kicker">Sender</p>
-              <h2>Send a file</h2>
-            </div>
-            <button id="refresh-devices" class="secondary-button" type="button">Refresh</button>
+    <main class="window-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark">FT</div>
+          <div>
+            <h1>FastTransfer</h1>
+            <p>Nearby transfer utility</p>
           </div>
+        </div>
 
-          <label class="field">
-            <span>Source package</span>
-            <div class="source-picker-row">
-              <input id="source-path" type="text" placeholder="Choose a file or folder" readonly />
-              <button id="pick-source-file" type="button" class="secondary-button">File</button>
-              <button id="pick-source-folder" type="button" class="secondary-button">Folder</button>
-            </div>
-          </label>
+        <nav class="sidebar-nav" aria-label="Primary">
+          <button class="nav-item active" data-view="send" type="button">Send</button>
+          <button class="nav-item" data-view="receive" type="button">Receive</button>
+          <button class="nav-item" data-view="transfers" type="button">Transfers</button>
+          <button class="nav-item" data-view="devices" type="button">Devices</button>
+          <button class="nav-item" data-view="settings" type="button">Settings</button>
+        </nav>
 
-          <section class="package-card">
-            <div class="status-row">
-              <span class="status-label">Package summary</span>
-              <span id="package-kind-badge" class="badge idle">Nothing selected</span>
-            </div>
-            <p id="package-summary-message" class="status-copy">Choose a file or folder to preview the package structure before sending.</p>
-            <dl class="summary-grid compact-grid">
-              <div>
-                <dt>Root</dt>
-                <dd id="package-root-name">Pending</dd>
-              </div>
-              <div>
-                <dt>Kind</dt>
-                <dd id="package-root-kind">Pending</dd>
-              </div>
-              <div>
-                <dt>Total files</dt>
-                <dd id="package-total-files">0</dd>
-              </div>
-              <div>
-                <dt>Total folders</dt>
-                <dd id="package-total-folders">0</dd>
-              </div>
-              <div class="wide-tile">
-                <dt>Total size</dt>
-                <dd id="package-total-bytes">0 B</dd>
-              </div>
-            </dl>
-          </section>
-
-          <section class="section-block">
-            <div class="section-header">
-              <span>Nearby receivers</span>
-            </div>
-            <div id="nearby-devices" class="device-list empty-state">
-              No nearby receivers yet. Start the receiver view and refresh.
-            </div>
-          </section>
-
-          <section class="identity-card hidden-identity" hidden>
-            <div class="status-row">
-              <span class="status-label">Selected receiver</span>
-              <span id="selected-device-badge" class="badge idle">None</span>
-            </div>
-            <p id="selected-device-message" class="status-copy">Refresh nearby devices and choose a receiver for automatic LAN trust.</p>
-            <dl class="summary-grid compact-grid">
-              <div>
-                <dt>Device</dt>
-                <dd id="selected-device-name">No receiver selected</dd>
-              </div>
-              <div>
-                <dt>Address</dt>
-                <dd id="selected-device-address">Pending</dd>
-              </div>
-              <div>
-                <dt>Fingerprint</dt>
-                <dd id="selected-device-fingerprint">Pending</dd>
-              </div>
-              <div>
-                <dt>Trust</dt>
-                <dd id="selected-device-trust">Pending</dd>
-              </div>
-            </dl>
-          </section>
-
-          <details class="manual-panel">
-            <summary>Advanced settings</summary>
-            <label class="manual-toggle">
-              <input id="manual-mode" type="checkbox" />
-              <span>Use manual target mode instead of the selected nearby receiver</span>
-            </label>
-
-            <label class="field">
-              <span>Manual target</span>
-              <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
-            </label>
-
-            <label class="field">
-              <span>Receiver certificate</span>
-              <div class="inline-input">
-                <input id="certificate-path" type="text" placeholder="Pick receiver-cert.der" readonly />
-                <button id="pick-certificate" type="button" class="secondary-button">Browse</button>
-              </div>
-            </label>
-
-            <div class="settings-grid settings-grid-wide">
-              <label class="field compact">
-                <span>Server name</span>
-                <input id="server-name" type="text" value="fasttransfer.local" />
-              </label>
-              <label class="field compact">
-                <span>Chunk size</span>
-                <input id="chunk-size" type="number" min="1" step="1" value="1048576" />
-              </label>
-              <label class="field compact">
-                <span>Parallelism</span>
-                <input id="parallelism" type="number" min="1" step="1" value="4" />
-              </label>
-            </div>
-          </details>
-
-          <button id="send-button" class="primary-button action-button" type="button">Send file</button>
-
-          <section class="status-card compact-status">
-            <div class="status-row">
-              <span class="status-label">Send status</span>
-              <span id="send-badge" class="badge idle">Idle</span>
-            </div>
-            <p id="send-message" class="status-copy">Refresh nearby devices, pick a receiver, choose a file or folder, and send.</p>
-            <div class="progress-block">
-              <div class="progress-track"><div id="send-progress-bar" class="progress-fill"></div></div>
-              <div class="progress-meta">
-                <span id="send-progress-text">0%</span>
-                <span id="send-speed">0.00 MiB/s</span>
-              </div>
-            </div>
-            <dl class="summary-grid compact-grid transfer-grid">
-              <div>
-                <dt>Package</dt>
-                <dd id="send-summary-file">Not started</dd>
-              </div>
-              <div>
-                <dt>Transferred</dt>
-                <dd id="send-summary-bytes">0 B</dd>
-              </div>
-              <div>
-                <dt>Files</dt>
-                <dd id="send-summary-chunks">0</dd>
-              </div>
-              <div>
-                <dt>Current file</dt>
-                <dd id="send-summary-hash">Pending</dd>
-              </div>
-            </dl>
-          </section>
-        </article>
-
-        <article class="panel receiver-panel">
-          <div class="panel-heading compact-heading">
-            <div>
-              <p class="panel-kicker">Receiver</p>
-              <h2>Listen for transfers</h2>
-            </div>
-            <button id="start-receiver-top" class="secondary-button" type="button">Start receiver</button>
+        <div class="sidebar-meta">
+          <div class="meta-block">
+            <span class="meta-label">Receiver</span>
+            <strong id="sidebar-receiver-state">Stopped</strong>
           </div>
+          <div class="meta-block">
+            <span class="meta-label">Selected device</span>
+            <strong id="sidebar-selected-device">None</strong>
+          </div>
+        </div>
+      </aside>
 
-          <label class="field">
-            <span>Advertised device name</span>
-            <input id="device-name" type="text" placeholder="Office Laptop" />
-          </label>
+      <section class="workspace">
+        <header class="workspace-header">
+          <div>
+            <h2 id="view-title">Send</h2>
+            <p id="view-subtitle">Choose a file or folder and send it to a nearby receiver.</p>
+          </div>
+          <div class="header-actions">
+            <button id="global-refresh" class="secondary-button" type="button">Refresh devices</button>
+          </div>
+        </header>
 
-          <label class="field">
-            <span>Save files to</span>
-            <div class="inline-input receiver-path-row">
-              <input id="receiver-output" type="text" value="Downloads/FastTransfer" readonly />
-              <button id="browse-output" type="button" class="secondary-button">Browse</button>
+        <section class="view-host">
+          <section class="view active" data-screen="send">
+            <div class="content-grid send-grid">
+              <section class="pane">
+                <div class="pane-header">
+                  <h3>Send package</h3>
+                </div>
+
+                <label class="field">
+                  <span>Source package</span>
+                  <div class="picker-row">
+                    <input id="source-path" type="text" placeholder="Choose a file or folder" readonly />
+                    <button id="pick-source-file" type="button">File</button>
+                    <button id="pick-source-folder" type="button">Folder</button>
+                  </div>
+                </label>
+
+                <section class="card">
+                  <div class="card-header">
+                    <span>Selected target</span>
+                    <span id="send-target-badge" class="badge idle">No target</span>
+                  </div>
+                  <p id="send-target-message" class="card-copy">Select a nearby receiver or use manual target mode.</p>
+                  <dl class="info-grid">
+                    <div>
+                      <dt>Device</dt>
+                      <dd id="send-target-name">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Address</dt>
+                      <dd id="send-target-address">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Fingerprint</dt>
+                      <dd id="send-target-fingerprint">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Trust</dt>
+                      <dd id="send-target-trust">Pending</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section class="card">
+                  <div class="card-header">
+                    <span>Package summary</span>
+                    <span id="package-kind-badge" class="badge idle">Nothing selected</span>
+                  </div>
+                  <p id="package-summary-message" class="card-copy">Choose a file or folder to preview the package structure before sending.</p>
+                  <dl class="info-grid compact-grid">
+                    <div>
+                      <dt>Root</dt>
+                      <dd id="package-root-name">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Kind</dt>
+                      <dd id="package-root-kind">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Total files</dt>
+                      <dd id="package-total-files">0</dd>
+                    </div>
+                    <div>
+                      <dt>Total folders</dt>
+                      <dd id="package-total-folders">0</dd>
+                    </div>
+                    <div>
+                      <dt>Total bytes</dt>
+                      <dd id="package-total-bytes">0 B</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <details class="expander">
+                  <summary>Advanced settings</summary>
+                  <div class="expander-body">
+                    <label class="toggle-row">
+                      <input id="manual-mode" type="checkbox" />
+                      <span>Use manual target mode instead of the selected nearby receiver</span>
+                    </label>
+
+                    <label class="field">
+                      <span>Manual target</span>
+                      <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
+                    </label>
+
+                    <label class="field">
+                      <span>Receiver certificate</span>
+                      <div class="picker-row picker-row-inline">
+                        <input id="certificate-path" type="text" placeholder="Pick receiver-cert.der" readonly />
+                        <button id="pick-certificate" type="button">Browse</button>
+                      </div>
+                    </label>
+
+                    <div class="settings-grid">
+                      <label class="field compact">
+                        <span>Server name</span>
+                        <input id="server-name" type="text" value="fasttransfer.local" />
+                      </label>
+                      <label class="field compact">
+                        <span>Chunk size</span>
+                        <input id="chunk-size" type="number" min="1" step="1" value="1048576" />
+                      </label>
+                      <label class="field compact">
+                        <span>Parallelism</span>
+                        <input id="parallelism" type="number" min="1" step="1" value="4" />
+                      </label>
+                    </div>
+                  </div>
+                </details>
+
+                <div class="action-row">
+                  <button id="send-button" class="primary-button" type="button">Send</button>
+                </div>
+
+                <section class="card">
+                  <div class="card-header">
+                    <span>Transfer status</span>
+                    <span id="send-badge" class="badge idle">Idle</span>
+                  </div>
+                  <p id="send-message" class="card-copy">Ready.</p>
+                  <div class="progress-block">
+                    <div class="progress-track"><div id="send-progress-bar" class="progress-fill"></div></div>
+                    <div class="progress-meta">
+                      <span id="send-progress-text">0%</span>
+                      <span id="send-speed">0.00 MiB/s</span>
+                    </div>
+                  </div>
+                  <dl class="info-grid compact-grid">
+                    <div>
+                      <dt>Name</dt>
+                      <dd id="send-summary-file">Not started</dd>
+                    </div>
+                    <div>
+                      <dt>Progress</dt>
+                      <dd id="send-summary-bytes">0 B</dd>
+                    </div>
+                    <div>
+                      <dt>Files</dt>
+                      <dd id="send-summary-chunks">0</dd>
+                    </div>
+                    <div>
+                      <dt>Current file</dt>
+                      <dd id="send-summary-hash">Pending</dd>
+                    </div>
+                  </dl>
+                </section>
+              </section>
+
+              <section class="pane">
+                <div class="pane-header with-action">
+                  <h3>Nearby devices</h3>
+                  <button id="refresh-devices-send" class="secondary-button" type="button">Refresh</button>
+                </div>
+                <div id="send-device-list" class="list-panel empty-state">No nearby receivers were found yet.</div>
+              </section>
             </div>
-          </label>
-
-          <section class="receiver-dropzone">
-            <div class="receiver-dropzone-icon">&#8593;</div>
-            <p id="receiver-message" class="dropzone-copy">Start the receiver to advertise this device and accept incoming transfers</p>
           </section>
 
-          <button id="start-receiver" class="primary-button action-button muted-action" type="button">Start receiver</button>
+          <section class="view" data-screen="receive" hidden>
+            <div class="content-grid receive-grid">
+              <section class="pane">
+                <div class="pane-header with-action">
+                  <h3>Receiver</h3>
+                  <button id="receiver-toggle" class="primary-button" type="button">Start receiver</button>
+                </div>
 
-          <section class="status-card compact-status receiver-status-card">
-            <div class="status-row">
-              <span class="status-label">Receive status</span>
-              <span id="receiver-badge" class="badge idle">Idle</span>
+                <label class="field">
+                  <span>Advertised device name</span>
+                  <input id="device-name" type="text" placeholder="Office Laptop" />
+                </label>
+
+                <label class="field">
+                  <span>Save files to</span>
+                  <div class="picker-row picker-row-inline">
+                    <input id="receiver-output" type="text" readonly />
+                    <button id="browse-output" type="button">Browse</button>
+                  </div>
+                </label>
+
+                <section class="card">
+                  <div class="card-header">
+                    <span>Current incoming transfer</span>
+                    <span id="receiver-badge" class="badge idle">Idle</span>
+                  </div>
+                  <p id="receiver-message" class="card-copy">Receiver is stopped.</p>
+                  <div class="progress-block">
+                    <div class="progress-track"><div id="receiver-progress-bar" class="progress-fill"></div></div>
+                    <div class="progress-meta">
+                      <span id="receiver-progress-text">0%</span>
+                      <span id="receiver-speed">0.00 MiB/s</span>
+                    </div>
+                  </div>
+                  <dl class="info-grid compact-grid">
+                    <div>
+                      <dt>Listening</dt>
+                      <dd id="receiver-bind">Not started</dd>
+                    </div>
+                    <div>
+                      <dt>Current file</dt>
+                      <dd id="receiver-file">None yet</dd>
+                    </div>
+                    <div>
+                      <dt>Saved path</dt>
+                      <dd id="receiver-saved-path">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Identity</dt>
+                      <dd id="receiver-certificate">Pending</dd>
+                    </div>
+                  </dl>
+                </section>
+              </section>
+
+              <section class="pane">
+                <div class="pane-header">
+                  <h3>Recent received items</h3>
+                </div>
+                <div id="recent-received-list" class="list-panel empty-state">No received items yet.</div>
+              </section>
             </div>
-            <div class="progress-block">
-              <div class="progress-track"><div id="receiver-progress-bar" class="progress-fill"></div></div>
-              <div class="progress-meta">
-                <span id="receiver-progress-text">0%</span>
-                <span id="receiver-speed">0.00 MiB/s</span>
-              </div>
-            </div>
-            <dl class="summary-grid compact-grid transfer-grid">
-              <div>
-                <dt>Listening</dt>
-                <dd id="receiver-bind">Not started</dd>
-              </div>
-              <div>
-                <dt>Current file</dt>
-                <dd id="receiver-file">None yet</dd>
-              </div>
-              <div>
-                <dt>Saved path</dt>
-                <dd id="receiver-saved-path">Pending</dd>
-              </div>
-              <div>
-                <dt>Identity</dt>
-                <dd id="receiver-certificate">Pending</dd>
-              </div>
-            </dl>
           </section>
-        </article>
+
+          <section class="view" data-screen="transfers" hidden>
+            <section class="pane full-pane">
+              <div class="pane-header">
+                <h3>Transfers</h3>
+              </div>
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Status</th>
+                      <th>Progress</th>
+                      <th>Speed</th>
+                      <th>Destination</th>
+                    </tr>
+                  </thead>
+                  <tbody id="transfers-table-body">
+                    <tr>
+                      <td colspan="5" class="table-empty">No transfer activity yet.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section class="view" data-screen="devices" hidden>
+            <div class="content-grid devices-grid">
+              <section class="pane">
+                <div class="pane-header with-action">
+                  <h3>Nearby devices</h3>
+                  <button id="refresh-devices-view" class="secondary-button" type="button">Refresh</button>
+                </div>
+                <div id="devices-nearby-list" class="list-panel empty-state">No nearby devices.</div>
+              </section>
+
+              <section class="pane">
+                <div class="pane-header">
+                  <h3>Trusted devices</h3>
+                </div>
+                <div id="trusted-device-list" class="list-panel empty-state">No trusted devices yet.</div>
+                <section class="card detail-card">
+                  <div class="card-header">
+                    <span>Device identity</span>
+                    <span id="device-detail-badge" class="badge idle">None</span>
+                  </div>
+                  <p id="device-detail-message" class="card-copy">Select a nearby device to inspect its identity information.</p>
+                  <dl class="info-grid compact-grid">
+                    <div>
+                      <dt>Device</dt>
+                      <dd id="device-detail-name">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Address</dt>
+                      <dd id="device-detail-address">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Fingerprint</dt>
+                      <dd id="device-detail-fingerprint">Pending</dd>
+                    </div>
+                    <div>
+                      <dt>Trust</dt>
+                      <dd id="device-detail-trust">Pending</dd>
+                    </div>
+                  </dl>
+                </section>
+              </section>
+            </div>
+          </section>
+
+          <section class="view" data-screen="settings" hidden>
+            <div class="content-grid settings-layout">
+              <section class="pane">
+                <div class="pane-header">
+                  <h3>General</h3>
+                </div>
+                <section class="card settings-card">
+                  <label class="field">
+                    <span>Default receive folder</span>
+                    <div class="picker-row picker-row-inline">
+                      <input id="settings-receive-folder" type="text" readonly />
+                      <button id="settings-browse-output" type="button">Browse</button>
+                    </div>
+                  </label>
+                  <label class="toggle-row">
+                    <input id="settings-lan-discovery" type="checkbox" checked />
+                    <span>Enable LAN device discovery</span>
+                  </label>
+                  <label class="toggle-row">
+                    <input id="settings-auto-trust" type="checkbox" checked />
+                    <span>Allow trust-on-first-use for discovered LAN devices</span>
+                  </label>
+                </section>
+              </section>
+
+              <section class="pane">
+                <div class="pane-header">
+                  <h3>Advanced network</h3>
+                </div>
+                <section class="card settings-card">
+                  <label class="field">
+                    <span>Receiver bind address</span>
+                    <input id="settings-bind-address" type="text" value="0.0.0.0:5000" readonly />
+                  </label>
+                  <label class="field">
+                    <span>Discovery timeout</span>
+                    <input id="settings-discovery-timeout" type="number" value="3" min="1" step="1" />
+                  </label>
+                  <label class="field">
+                    <span>Theme</span>
+                    <input id="settings-theme" type="text" value="System (placeholder)" readonly />
+                  </label>
+                </section>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <footer class="status-bar">
+          <span id="status-left">Ready.</span>
+          <span id="status-center">Receiver stopped</span>
+          <span id="status-right">No target selected</span>
+        </footer>
       </section>
     </main>
   </body>
