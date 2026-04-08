@@ -3,7 +3,8 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -20,10 +21,10 @@ use tokio::sync::oneshot;
 use transfer_core::{
     assess_discovered_receiver, bind_receiver, ensure_preferred_receive_dir,
     inspect_transfer_source, prepare_discovered_send_request, preferred_receive_dir_label,
-    recommend_transfer_tuning,
-    send_file_with_progress, DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport,
-    ReceiverTrustState, SendRequest, TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE,
-    DEFAULT_PARALLELISM,
+    recommend_transfer_tuning, run_destination_sink_with_progress,
+    DestinationSink, DiscoveredSendRequest, LanSink, LocalCopyRequest, LocalDestinationKind,
+    LocalFolderSink, ReceiveRequest, ReceiverTrustReport, ReceiverTrustState, SendRequest,
+    TransferProgress, TransferSummary, UsbDriveSink, DEFAULT_CHUNK_SIZE, DEFAULT_PARALLELISM,
 };
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
@@ -195,6 +196,63 @@ impl SendDesktopRequest {
     }
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RemovableDrivePayload {
+    id: String,
+    drive_letter: String,
+    label: String,
+    mount_path: String,
+    file_system: Option<String>,
+    free_bytes: u64,
+    total_bytes: u64,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DesktopLocalDestinationKind {
+    LocalFolder,
+    UsbDrive,
+}
+
+impl DesktopLocalDestinationKind {
+    fn to_transfer_kind(self) -> LocalDestinationKind {
+        match self {
+            Self::LocalFolder => LocalDestinationKind::LocalFolder,
+            Self::UsbDrive => LocalDestinationKind::UsbDrive,
+        }
+    }
+
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::LocalFolder => "local folder",
+            Self::UsbDrive => "USB or external drive",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartLocalCopyRequest {
+    source_path: String,
+    destination_path: String,
+    destination_kind: DesktopLocalDestinationKind,
+    chunk_size: Option<u32>,
+    parallelism: Option<usize>,
+}
+
+impl StartLocalCopyRequest {
+    fn into_local_copy_request(self) -> LocalCopyRequest {
+        LocalCopyRequest {
+            source_path: PathBuf::from(self.source_path),
+            destination_dir: PathBuf::from(self.destination_path),
+            chunk_size: self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
+            parallelism: self.parallelism.unwrap_or(DEFAULT_PARALLELISM).max(1),
+            destination_kind: self.destination_kind.to_transfer_kind(),
+        }
+    }
+}
+
 #[tauri::command]
 fn pick_source_file() -> Option<String> {
     FileDialog::new()
@@ -217,6 +275,19 @@ fn pick_receive_folder() -> Option<String> {
         .set_title("Choose where received files should be saved")
         .pick_folder()
         .map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+fn pick_local_destination_folder() -> Option<String> {
+    FileDialog::new()
+        .set_title("Choose destination folder")
+        .pick_folder()
+        .map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+fn list_removable_drives() -> Result<Vec<RemovableDrivePayload>, String> {
+    query_removable_drives().map_err(format_error)
 }
 
 #[tauri::command]
@@ -504,6 +575,136 @@ fn stop_receiver(state: State<'_, DesktopState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn start_local_copy_transfer(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    request: StartLocalCopyRequest,
+) -> Result<(), String> {
+    let running = Arc::clone(&state.sender_running);
+    if running.swap(true, Ordering::SeqCst) {
+        return Err("A send operation is already in progress.".to_owned());
+    }
+
+    let source_path = PathBuf::from(request.source_path.clone());
+    let destination_path = PathBuf::from(request.destination_path.clone());
+    if request.destination_path.trim().is_empty() {
+        running.store(false, Ordering::SeqCst);
+        return Err("Choose a destination folder or drive before sending.".to_owned());
+    }
+
+    let destination_kind = request.destination_kind;
+    let summary = match inspect_transfer_source(source_path.as_path()).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            running.store(false, Ordering::SeqCst);
+            return Err(format_error(error));
+        }
+    };
+
+    let volume_info = match resolve_volume_for_path(destination_path.as_path()) {
+        Ok(volume) => volume,
+        Err(error) => {
+            running.store(false, Ordering::SeqCst);
+            return Err(format_error(error));
+        }
+    };
+
+    if destination_kind == DesktopLocalDestinationKind::UsbDrive {
+        if let Some(info) = &volume_info {
+            if info.drive_type != Some(2) {
+                running.store(false, Ordering::SeqCst);
+                return Err(format!(
+                    "Destination {} is not reported as a removable drive.",
+                    info.mount_path
+                ));
+            }
+        }
+    }
+
+    if let Some(info) = &volume_info {
+        if info.free_bytes < summary.total_bytes {
+            running.store(false, Ordering::SeqCst);
+            return Err(format!(
+                "Insufficient free space on {}: free {}, required {}.",
+                info.mount_path,
+                format_bytes(info.free_bytes),
+                format_bytes(summary.total_bytes)
+            ));
+        }
+
+        if info
+            .file_system
+            .as_deref()
+            .is_some_and(|fs| fs.eq_ignore_ascii_case("FAT32"))
+        {
+            const FAT32_LIMIT: u64 = (4 * 1024 * 1024 * 1024) - 1;
+            match tokio::task::spawn_blocking({
+                let source_path = source_path.clone();
+                move || find_first_file_exceeding(source_path.as_path(), FAT32_LIMIT)
+            })
+            .await
+            {
+                Ok(Ok(Some((path, size)))) => {
+                    running.store(false, Ordering::SeqCst);
+                    return Err(format!(
+                        "FAT32 destination {} cannot store {} ({}). Files must be smaller than 4 GiB.",
+                        info.mount_path,
+                        path.display(),
+                        format_bytes(size)
+                    ));
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    running.store(false, Ordering::SeqCst);
+                    return Err(format_error(error));
+                }
+                Err(join_error) => {
+                    running.store(false, Ordering::SeqCst);
+                    return Err(format!("failed to validate FAT32 constraints: {join_error}"));
+                }
+            }
+        }
+    }
+
+    println!(
+        "[DEST] Selected destination: {} ({})",
+        destination_path.display(),
+        destination_kind.as_label()
+    );
+
+    // Route the same transfer pipeline through a destination sink so LAN and local targets
+    // share progress reporting and orchestration behavior.
+    let local_request = request.into_local_copy_request();
+    let sink = match destination_kind {
+        DesktopLocalDestinationKind::LocalFolder => {
+            DestinationSink::LocalFolder(LocalFolderSink { request: local_request })
+        }
+        DesktopLocalDestinationKind::UsbDrive => {
+            DestinationSink::UsbDrive(UsbDriveSink { request: local_request })
+        }
+    };
+
+    let app_handle = app.clone();
+    let running_for_task = Arc::clone(&running);
+    let destination_label = compact_path_label(destination_path.as_path());
+    let source_display = source_path.display().to_string();
+
+    tauri::async_runtime::spawn(async move {
+        run_local_copy_task(
+            &app_handle,
+            sink,
+            &source_display,
+            &destination_label,
+            destination_kind,
+            running_for_task,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn start_send(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -604,7 +805,8 @@ async fn run_send_task(
 
     let app_for_progress = app_handle.clone();
     let progress_report = trust_report.clone();
-    let result = send_file_with_progress(send_request, move |progress| {
+    let sink = DestinationSink::Lan(LanSink { request: send_request });
+    let result = run_destination_sink_with_progress(sink, move |progress| {
         let progress_payload: ProgressPayload = progress.into();
         let state = if progress_payload.phase == "scanning" {
             "scanning"
@@ -639,6 +841,84 @@ async fn run_send_task(
             SendStatusPayload {
                 state: "error".to_owned(),
                 message: format!("Failed to send {source_path}: {error:#}"),
+                progress: None,
+                summary: None,
+            },
+        ),
+    }
+
+    running.store(false, Ordering::SeqCst);
+}
+
+async fn run_local_copy_task(
+    app_handle: &AppHandle,
+    sink: DestinationSink,
+    source_path: &str,
+    destination_label: &str,
+    destination_kind: DesktopLocalDestinationKind,
+    running: Arc<AtomicBool>,
+) {
+    emit_send_status(
+        app_handle,
+        SendStatusPayload {
+            state: "starting".to_owned(),
+            message: format!(
+                "Preparing local copy to {} ({})...",
+                destination_label,
+                destination_kind.as_label()
+            ),
+            progress: None,
+            summary: None,
+        },
+    );
+
+    let app_for_progress = app_handle.clone();
+    let destination_label_for_progress = destination_label.to_owned();
+    let kind_label = destination_kind.as_label().to_owned();
+    let result = run_destination_sink_with_progress(sink, move |progress| {
+        let progress_payload: ProgressPayload = progress.into();
+        let state = if progress_payload.phase == "scanning" {
+            "scanning"
+        } else {
+            "sending"
+        };
+
+        emit_send_status(
+            &app_for_progress,
+            SendStatusPayload {
+                state: state.to_owned(),
+                message: format!(
+                    "{} to {} ({}).",
+                    if state == "scanning" {
+                        "Scanning package"
+                    } else {
+                        "Copying"
+                    },
+                    destination_label_for_progress,
+                    kind_label
+                ),
+                progress: Some(progress_payload),
+                summary: None,
+            },
+        );
+    })
+    .await;
+
+    match result {
+        Ok(summary) => emit_send_status(
+            app_handle,
+            SendStatusPayload {
+                state: "completed".to_owned(),
+                message: format!("Copy to {} completed successfully.", destination_label),
+                progress: None,
+                summary: Some(summary.into()),
+            },
+        ),
+        Err(error) => emit_send_status(
+            app_handle,
+            SendStatusPayload {
+                state: "error".to_owned(),
+                message: format!("Failed to copy {source_path} to {destination_label}: {error:#}"),
                 progress: None,
                 summary: None,
             },
@@ -716,6 +996,261 @@ fn format_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+#[derive(Debug, Clone)]
+struct LogicalDiskInfo {
+    device_id: String,
+    volume_name: Option<String>,
+    file_system: Option<String>,
+    total_bytes: u64,
+    free_bytes: u64,
+    drive_type: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct VolumeInfo {
+    mount_path: String,
+    file_system: Option<String>,
+    free_bytes: u64,
+    drive_type: Option<u32>,
+}
+
+fn query_removable_drives() -> Result<Vec<RemovableDrivePayload>> {
+    let mut drives = query_logical_disks()?
+        .into_iter()
+        .filter(|disk| disk.drive_type == Some(2))
+        .map(|disk| {
+            let mount_path = format!("{}\\", disk.device_id.trim_end_matches('\\'));
+            let label = disk
+                .volume_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "Removable drive".to_owned());
+
+            RemovableDrivePayload {
+                id: disk.device_id.clone(),
+                drive_letter: disk.device_id,
+                label,
+                mount_path,
+                file_system: disk.file_system,
+                free_bytes: disk.free_bytes,
+                total_bytes: disk.total_bytes,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    drives.sort_by(|left, right| left.drive_letter.cmp(&right.drive_letter));
+    Ok(drives)
+}
+
+fn resolve_volume_for_path(path: &Path) -> Result<Option<VolumeInfo>> {
+    #[cfg(target_os = "windows")]
+    {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .context("failed to read current directory while resolving destination")?
+                .join(path)
+        };
+
+        let Some(drive_id) = drive_id_from_path(absolute.as_path()) else {
+            return Ok(None);
+        };
+
+        let disk = query_logical_disks()?
+            .into_iter()
+            .find(|entry| entry.device_id.eq_ignore_ascii_case(&drive_id));
+        Ok(disk.map(|entry| VolumeInfo {
+            mount_path: format!("{}\\", entry.device_id.trim_end_matches('\\')),
+            file_system: entry.file_system,
+            free_bytes: entry.free_bytes,
+            drive_type: entry.drive_type,
+        }))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn query_logical_disks() -> Result<Vec<LogicalDiskInfo>> {
+    let script = "Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,FileSystem,Size,FreeSpace,DriveType | ConvertTo-Json -Compress";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .context("failed to query logical disks via PowerShell")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "PowerShell drive query failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows = parse_json_rows(stdout.as_ref())?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let device_id = parse_json_string(&row, "DeviceID")?;
+            let normalized_device = device_id.trim().trim_end_matches('\\').to_uppercase();
+            if normalized_device.is_empty() {
+                return None;
+            }
+
+            Some(LogicalDiskInfo {
+                device_id: normalized_device,
+                volume_name: parse_json_string(&row, "VolumeName"),
+                file_system: parse_json_string(&row, "FileSystem"),
+                total_bytes: parse_json_u64(&row, "Size").unwrap_or(0),
+                free_bytes: parse_json_u64(&row, "FreeSpace").unwrap_or(0),
+                drive_type: parse_json_u32(&row, "DriveType"),
+            })
+        })
+        .collect())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn query_logical_disks() -> Result<Vec<LogicalDiskInfo>> {
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "windows")]
+fn parse_json_rows(raw: &str) -> Result<Vec<serde_json::Value>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(Vec::new());
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).context("failed to parse logical disk JSON payload")?;
+
+    Ok(match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(_) => vec![value],
+        _ => Vec::new(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn parse_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    match value.get(key) {
+        Some(serde_json::Value::Number(number)) => number.as_u64(),
+        Some(serde_json::Value::String(text)) => text.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_json_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
+    match value.get(key) {
+        Some(serde_json::Value::Number(number)) => number.as_u64().and_then(|n| u32::try_from(n).ok()),
+        Some(serde_json::Value::String(text)) => text.parse::<u32>().ok(),
+        _ => None,
+    }
+}
+
+fn drive_id_from_path(path: &Path) -> Option<String> {
+    let raw = path.to_string_lossy();
+    let bytes = raw.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' {
+        return None;
+    }
+
+    Some(raw[..2].to_uppercase())
+}
+
+fn find_first_file_exceeding(path: &Path, limit: u64) -> Result<Option<(PathBuf, u64)>> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?;
+
+    if metadata.is_file() {
+        return if metadata.len() > limit {
+            Ok(Some((path.to_path_buf(), metadata.len())))
+        } else {
+            Ok(None)
+        };
+    }
+
+    if !metadata.is_dir() {
+        return Ok(None);
+    }
+
+    let mut children = std::fs::read_dir(path)
+        .with_context(|| format!("failed to read directory {}", path.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to enumerate directory {}", path.display()))?;
+    children.sort_by_key(|entry| entry.file_name());
+
+    for child in children {
+        let child_path = child.path();
+        if let Some(found) = find_first_file_exceeding(child_path.as_path(), limit)? {
+            return Ok(Some(found));
+        }
+    }
+
+    Ok(None)
+}
+
+fn compact_path_label(path: &Path) -> String {
+    let normalized = path.display().to_string().replace('\\', "/");
+    let lowered = normalized.to_ascii_lowercase();
+
+    if let Some(index) = lowered.find("/downloads/") {
+        let start = index + 1;
+        if start < normalized.len() {
+            return normalized[start..].to_owned();
+        }
+    }
+
+    if let Some(index) = lowered.find("/desktop/") {
+        let start = index + 1;
+        if start < normalized.len() {
+            return normalized[start..].to_owned();
+        }
+    }
+
+    normalized
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    if bytes == 0 {
+        return "0 B".to_owned();
+    }
+
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(DesktopState::default())
@@ -725,11 +1260,15 @@ fn main() {
             inspect_source,
             pick_certificate_file,
             pick_receive_folder,
+            pick_local_destination_folder,
+            list_removable_drives,
             discover_nearby_receivers,
             start_receiver,
             stop_receiver,
-            start_send
+            start_send,
+            start_local_copy_transfer
         ])
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+

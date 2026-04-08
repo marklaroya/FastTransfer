@@ -44,7 +44,11 @@ const elements = {
   packageTotalFolders: $("#package-total-folders"),
   packageTotalBytes: $("#package-total-bytes"),
 
-  manualMode: $("#manual-mode"),
+  destinationModeButtons: $$('[data-destination-mode]'),
+  destinationNearbyPanel: $("#destination-nearby-panel"),
+  destinationManualPanel: $("#destination-manual-panel"),
+  destinationUsbPanel: $("#destination-usb-panel"),
+  destinationLocalPanel: $("#destination-local-panel"),
   targetAddress: $("#target-address"),
   certificatePath: $("#certificate-path"),
   pickCertificate: $("#pick-certificate"),
@@ -53,6 +57,11 @@ const elements = {
   parallelism: $("#parallelism"),
   autoTune: $("#auto-tune"),
   autoTuneSummary: $("#auto-tune-summary"),
+  pickLocalDestination: $("#pick-local-destination"),
+  localDestinationPath: $("#local-destination-path"),
+  refreshUsbDrives: $("#refresh-usb-drives"),
+  usbDriveSelect: $("#usb-drive-select"),
+  usbDriveMeta: $("#usb-drive-meta"),
   sendButton: $("#send-button"),
 
   sendBadge: $("#send-badge"),
@@ -128,6 +137,12 @@ const appState = {
   devices: [],
   deviceSearch: "",
   selectedPeerId: null,
+  destinationMode: "nearby",
+  removableDrives: [],
+  selectedUsbDriveId: null,
+  localDestinationPath: "",
+  currentSendMode: "nearby",
+  currentSendDestinationLabel: "",
   sourceSummary: null,
   sendBusy: false,
   receiverActive: false,
@@ -349,6 +364,131 @@ function selectedDevice() {
   return appState.devices.find((device) => device.peerId === appState.selectedPeerId) ?? null;
 }
 
+function selectedUsbDrive() {
+  return appState.removableDrives.find((drive) => drive.id === appState.selectedUsbDriveId) ?? null;
+}
+
+function currentDestinationLabel() {
+  if (appState.currentSendDestinationLabel) {
+    return appState.currentSendDestinationLabel;
+  }
+
+  if (appState.destinationMode === "manual") {
+    return elements.targetAddress.value.trim() || "Manual target";
+  }
+
+  if (appState.destinationMode === "usb") {
+    const drive = selectedUsbDrive();
+    return drive ? drive.driveLetter + " - " + drive.label : "USB drive";
+  }
+
+  if (appState.destinationMode === "local") {
+    return elements.localDestinationPath.value.trim() || "Local folder";
+  }
+
+  return selectedDevice()?.deviceName || "No target selected";
+}
+
+function setDestinationMode(mode) {
+  if (!["nearby", "manual", "usb", "local"].includes(mode)) {
+    return;
+  }
+
+  appState.destinationMode = mode;
+  if (mode === "usb" && !appState.removableDrives.length) {
+    void refreshUsbDrives();
+  }
+  renderAll();
+}
+
+function renderUsbDriveOptions() {
+  const drives = appState.removableDrives;
+  if (!drives.length) {
+    elements.usbDriveSelect.innerHTML = '<option value="">No removable drives found</option>';
+    elements.usbDriveSelect.disabled = true;
+    elements.usbDriveMeta.textContent = "Plug in a USB drive and refresh.";
+    return;
+  }
+
+  if (!drives.some((drive) => drive.id === appState.selectedUsbDriveId)) {
+    appState.selectedUsbDriveId = drives[0].id;
+  }
+
+  elements.usbDriveSelect.disabled = false;
+  elements.usbDriveSelect.innerHTML = drives
+    .map((drive) => {
+      const label = drive.driveLetter + " - " + drive.label;
+      return '<option value="' + escapeHtml(drive.id) + '">' + escapeHtml(label) + "</option>";
+    })
+    .join("");
+  elements.usbDriveSelect.value = appState.selectedUsbDriveId ?? drives[0].id;
+
+  const selected = selectedUsbDrive();
+  if (!selected) {
+    elements.usbDriveMeta.textContent = "Select a removable drive.";
+    return;
+  }
+
+  const fs = selected.fileSystem ? selected.fileSystem.toUpperCase() : "Unknown FS";
+  elements.usbDriveMeta.textContent =
+    selected.driveLetter +
+    " (" +
+    selected.label +
+    ") - free " +
+    formatBytes(selected.freeBytes) +
+    " of " +
+    formatBytes(selected.totalBytes) +
+    " - " +
+    fs;
+}
+
+function renderDestinationModeControls() {
+  for (const button of elements.destinationModeButtons) {
+    const active = button.dataset.destinationMode === appState.destinationMode;
+    button.classList.toggle("active", active);
+  }
+
+  elements.destinationNearbyPanel.hidden = appState.destinationMode !== "nearby";
+  elements.destinationManualPanel.hidden = appState.destinationMode !== "manual";
+  elements.destinationUsbPanel.hidden = appState.destinationMode !== "usb";
+  elements.destinationLocalPanel.hidden = appState.destinationMode !== "local";
+
+  if (appState.destinationMode === "usb") {
+    renderUsbDriveOptions();
+  }
+}
+
+async function refreshUsbDrives() {
+  elements.refreshUsbDrives.disabled = true;
+  try {
+    const drives = await invoke("list_removable_drives");
+    appState.removableDrives = Array.isArray(drives) ? drives : [];
+    if (!appState.removableDrives.some((drive) => drive.id === appState.selectedUsbDriveId)) {
+      appState.selectedUsbDriveId = appState.removableDrives[0]?.id ?? null;
+    }
+    renderAll();
+  } catch (error) {
+    appState.removableDrives = [];
+    appState.selectedUsbDriveId = null;
+    renderAll();
+    applySendStatus({ state: "error", message: "Failed to list removable drives: " + String(error) });
+  } finally {
+    elements.refreshUsbDrives.disabled = false;
+  }
+}
+
+async function browseLocalDestination() {
+  try {
+    const selected = await invoke("pick_local_destination_folder");
+    if (selected) {
+      appState.localDestinationPath = selected;
+      elements.localDestinationPath.value = selected;
+      renderAll();
+    }
+  } catch (error) {
+    applySendStatus({ state: "error", message: "Failed to select destination folder: " + String(error) });
+  }
+}
 function filteredDevices() {
   const search = appState.deviceSearch.trim().toLowerCase();
   if (!search) return appState.devices;
@@ -445,16 +585,54 @@ async function setSourcePath(path) {
   }
 }
 function renderSelectedTarget() {
-  if (elements.manualMode.checked) {
+  if (appState.destinationMode === "manual") {
     const address = elements.targetAddress.value.trim();
     const hasCert = Boolean(elements.certificatePath.value);
     setPill(elements.sendTargetBadge, "Manual", address ? "active" : "idle");
-    elements.sendTargetName.textContent = "Manual target";
+    elements.sendTargetName.textContent = "Manual receiver";
     elements.sendTargetAddress.textContent = address || "Pending";
-    elements.sendTargetMessage.textContent = "Manual target mode is enabled for direct receiver entry.";
+    elements.sendTargetMessage.textContent = "Use this mode for direct address entry when discovery is unavailable.";
     elements.sendTargetFingerprint.textContent = hasCert ? basename(elements.certificatePath.value) : "Pending";
     elements.sendTargetTrust.textContent = hasCert ? "Manual certificate" : "Awaiting certificate";
     elements.actionTargetName.textContent = address || "manual target";
+    return;
+  }
+
+  if (appState.destinationMode === "usb") {
+    const drive = selectedUsbDrive();
+    if (!drive) {
+      setPill(elements.sendTargetBadge, "No drive", "idle");
+      elements.sendTargetName.textContent = "USB drive";
+      elements.sendTargetAddress.textContent = "Pending";
+      elements.sendTargetMessage.textContent = "Choose a removable drive to copy the package.";
+      elements.sendTargetFingerprint.textContent = "Pending";
+      elements.sendTargetTrust.textContent = "Pending";
+      elements.actionTargetName.textContent = "USB drive";
+      return;
+    }
+
+    const fs = drive.fileSystem ? drive.fileSystem.toUpperCase() : "Unknown FS";
+    setPill(elements.sendTargetBadge, "Drive selected", "success");
+    elements.sendTargetName.textContent = drive.driveLetter + " - " + drive.label;
+    elements.sendTargetAddress.textContent = drive.mountPath;
+    elements.sendTargetMessage.textContent = "Free space: " + formatBytes(drive.freeBytes) + " / " + formatBytes(drive.totalBytes) + ".";
+    elements.sendTargetFingerprint.textContent = fs;
+    elements.sendTargetTrust.textContent = "Local direct copy";
+    elements.actionTargetName.textContent = drive.driveLetter + " drive";
+    return;
+  }
+
+  if (appState.destinationMode === "local") {
+    const destination = elements.localDestinationPath.value.trim() || appState.localDestinationPath;
+    setPill(elements.sendTargetBadge, destination ? "Folder selected" : "No folder", destination ? "success" : "idle");
+    elements.sendTargetName.textContent = "Local folder";
+    elements.sendTargetAddress.textContent = destination || "Pending";
+    elements.sendTargetMessage.textContent = destination
+      ? "Package will be copied directly to this folder."
+      : "Choose a local destination folder.";
+    elements.sendTargetFingerprint.textContent = destination ? simplifiedPathLabel(destination) : "Pending";
+    elements.sendTargetTrust.textContent = destination ? "Local direct copy" : "Pending";
+    elements.actionTargetName.textContent = destination ? simplifiedPathLabel(destination) : "local folder";
     return;
   }
 
@@ -463,10 +641,10 @@ function renderSelectedTarget() {
     setPill(elements.sendTargetBadge, "No target", "idle");
     elements.sendTargetName.textContent = "No device selected";
     elements.sendTargetAddress.textContent = "Pending";
-    elements.sendTargetMessage.textContent = "Choose a nearby receiver or use manual mode.";
+    elements.sendTargetMessage.textContent = "Choose a nearby receiver or switch destination mode.";
     elements.sendTargetFingerprint.textContent = "Pending";
     elements.sendTargetTrust.textContent = "Pending";
-    elements.actionTargetName.textContent = "selected device";
+    elements.actionTargetName.textContent = "nearby device";
     return;
   }
 
@@ -554,7 +732,7 @@ function bindDeviceButtons(container, sourceList) {
       const device = sourceList[Number(button.dataset.deviceIndex)];
       if (!device || device.trustState === "fingerprint_mismatch") return;
       appState.selectedPeerId = device.peerId;
-      elements.manualMode.checked = false;
+      appState.destinationMode = "nearby";
       renderAll();
     });
   }
@@ -732,6 +910,7 @@ function syncOverflowTitles() {
     "#status-center",
     "#status-right",
     "#network-summary",
+    "#usb-drive-meta",
     ".device-name",
     ".device-address",
     ".received-item span",
@@ -750,7 +929,7 @@ function syncOverflowTitles() {
     }
   }
 
-  const inputSelectors = ["#source-path", "#receiver-output", "#settings-receive-folder", "#certificate-path"];
+  const inputSelectors = ["#source-path", "#receiver-output", "#settings-receive-folder", "#certificate-path", "#local-destination-path", "#target-address"];
   for (const selector of inputSelectors) {
     const node = document.querySelector(selector);
     if (!node) continue;
@@ -784,10 +963,14 @@ function updateStatusBar() {
     : "Receiver stopped";
   elements.statusRight.textContent = activeProgress
     ? `${activeProgress.status} - ${activeProgress.speed}`
-    : (elements.manualMode.checked ? (elements.targetAddress.value.trim() || "Manual target") : (selectedDevice()?.deviceName || "No target selected"));
+    : currentDestinationLabel();
 }
 
 function renderAll() {
+  renderDestinationModeControls();
+  if (!elements.localDestinationPath.value && appState.localDestinationPath) {
+    elements.localDestinationPath.value = appState.localDestinationPath;
+  }
   renderPackageSummary();
   renderTransferTuning();
   renderSelectedTarget();
@@ -887,40 +1070,106 @@ async function startSend() {
     return;
   }
 
-  if (elements.manualMode.checked) {
-    if (!elements.targetAddress.value.trim() || !elements.certificatePath.value) {
-      applySendStatus({ state: "error", message: "Manual mode requires both a receiver address and a receiver certificate." });
-      return;
-    }
-  } else if (!appState.selectedPeerId) {
-    applySendStatus({ state: "error", message: "Select a nearby receiver or enable manual mode." });
-    return;
-  }
-
+  const mode = appState.destinationMode;
   const tuning = activeTransferTuning();
 
   try {
-    await invoke("start_send", {
+    if (mode === "nearby") {
+      if (!appState.selectedPeerId) {
+        applySendStatus({ state: "error", message: "Select a nearby receiver first." });
+        return;
+      }
+
+      await invoke("start_send", {
+        request: {
+          sourcePath: elements.sourcePath.value,
+          selectedPeerId: appState.selectedPeerId,
+          targetAddr: null,
+          certificatePath: null,
+          serverName: elements.serverName.value.trim() || "fasttransfer.local",
+          chunkSize: tuning.chunkSize,
+          parallelism: tuning.parallelism,
+        },
+      });
+
+      appState.currentSendMode = mode;
+      appState.currentSendDestinationLabel = selectedDevice()?.deviceName || "Nearby receiver";
+      applySendStatus({ state: "starting", message: "Connecting to " + (selectedDevice()?.deviceName || "selected receiver") + "..." });
+      switchView("send");
+      return;
+    }
+
+    if (mode === "manual") {
+      if (!elements.targetAddress.value.trim() || !elements.certificatePath.value) {
+        applySendStatus({ state: "error", message: "Manual mode requires both receiver address and certificate." });
+        return;
+      }
+
+      await invoke("start_send", {
+        request: {
+          sourcePath: elements.sourcePath.value,
+          selectedPeerId: null,
+          targetAddr: elements.targetAddress.value.trim(),
+          certificatePath: elements.certificatePath.value,
+          serverName: elements.serverName.value.trim() || "fasttransfer.local",
+          chunkSize: tuning.chunkSize,
+          parallelism: tuning.parallelism,
+        },
+      });
+
+      appState.currentSendMode = mode;
+      appState.currentSendDestinationLabel = elements.targetAddress.value.trim();
+      applySendStatus({ state: "starting", message: "Connecting to " + elements.targetAddress.value.trim() + "..." });
+      switchView("send");
+      return;
+    }
+
+    if (mode === "usb") {
+      const drive = selectedUsbDrive();
+      if (!drive) {
+        applySendStatus({ state: "error", message: "Choose a removable drive first." });
+        return;
+      }
+
+      await invoke("start_local_copy_transfer", {
+        request: {
+          sourcePath: elements.sourcePath.value,
+          destinationPath: drive.mountPath,
+          destinationKind: "usb_drive",
+          chunkSize: tuning.chunkSize,
+          parallelism: tuning.parallelism,
+        },
+      });
+
+      appState.currentSendMode = mode;
+      appState.currentSendDestinationLabel = drive.driveLetter + " - " + drive.label;
+      applySendStatus({ state: "starting", message: "Preparing copy to " + drive.driveLetter + " (" + drive.label + ")..." });
+      switchView("send");
+      return;
+    }
+
+    const localDestination = elements.localDestinationPath.value.trim() || appState.localDestinationPath;
+    if (!localDestination) {
+      applySendStatus({ state: "error", message: "Choose a local destination folder first." });
+      return;
+    }
+
+    await invoke("start_local_copy_transfer", {
       request: {
         sourcePath: elements.sourcePath.value,
-        selectedPeerId: elements.manualMode.checked ? null : appState.selectedPeerId,
-        targetAddr: elements.manualMode.checked ? elements.targetAddress.value.trim() : null,
-        certificatePath: elements.manualMode.checked ? elements.certificatePath.value : null,
-        serverName: elements.serverName.value.trim() || "fasttransfer.local",
+        destinationPath: localDestination,
+        destinationKind: "local_folder",
         chunkSize: tuning.chunkSize,
         parallelism: tuning.parallelism,
       },
     });
 
-    applySendStatus({
-      state: "starting",
-      message: elements.manualMode.checked
-        ? `Connecting to ${elements.targetAddress.value.trim()}...`
-        : `Connecting to ${selectedDevice()?.deviceName ?? "selected receiver"}...`,
-    });
+    appState.currentSendMode = mode;
+    appState.currentSendDestinationLabel = simplifiedPathLabel(localDestination);
+    applySendStatus({ state: "starting", message: "Preparing copy to " + simplifiedPathLabel(localDestination) + "..." });
     switchView("send");
   } catch (error) {
-    applySendStatus({ state: "error", message: `${error}` });
+    applySendStatus({ state: "error", message: String(error) });
   }
 }
 
@@ -943,7 +1192,7 @@ function applySendStatus(payload) {
   if (payload.progress) {
     applyProgress(elements.sendProgressBar, elements.sendProgressText, elements.sendSpeed, payload.progress);
     elements.sendSummaryFile.textContent = appState.sourceSummary?.rootName ?? basename(elements.sourcePath.value) ?? "Outgoing package";
-    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} - ${selectedDevice()?.deviceName ?? (elements.targetAddress.value.trim() || "Manual target")}`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} - ${currentDestinationLabel()}`;
     elements.sendSummaryBytes.textContent = `${formatBytes(payload.progress.transferredBytes)} / ${formatBytes(payload.progress.totalBytes)}`;
     elements.sendSummaryChunks.textContent = `${payload.progress.completedFiles} / ${payload.progress.totalFiles}`;
     elements.sendSummaryHash.textContent = payload.progress.currentPath || (payload.progress.phase === "scanning" ? "Scanning files..." : "Preparing files");
@@ -964,9 +1213,7 @@ function applySendStatus(payload) {
 
   const transferName = appState.sourceSummary?.rootName || basename(elements.sourcePath.value) || "Outgoing package";
   const transferKind = appState.sourceSummary ? packageKindLabel(appState.sourceSummary.rootKind) : "Package";
-  const destination = elements.manualMode.checked
-    ? elements.targetAddress.value.trim() || "Manual target"
-    : selectedDevice()?.deviceName || "Nearby device";
+  const destination = currentDestinationLabel();
 
   if (["starting", "scanning", "sending", "completed", "error"].includes(state)) {
     const id = ensureTransfer("currentSendTransferId", "Send", transferKind, transferName, destination);
@@ -984,6 +1231,8 @@ function applySendStatus(payload) {
     });
     if (["completed", "error"].includes(state)) {
       appState.currentSendTransferId = null;
+      appState.currentSendDestinationLabel = "";
+      appState.currentSendMode = appState.destinationMode;
     }
   }
 
@@ -1133,7 +1382,17 @@ function wireEvents() {
     }
   });
 
-  elements.manualMode.addEventListener("change", renderAll);
+  for (const button of elements.destinationModeButtons) {
+    button.addEventListener("click", () => setDestinationMode(button.dataset.destinationMode));
+  }
+
+  elements.refreshUsbDrives.addEventListener("click", refreshUsbDrives);
+  elements.usbDriveSelect.addEventListener("change", () => {
+    appState.selectedUsbDriveId = elements.usbDriveSelect.value || null;
+    renderAll();
+  });
+  elements.pickLocalDestination.addEventListener("click", browseLocalDestination);
+
   elements.targetAddress.addEventListener("input", () => {
     renderSelectedTarget();
     updateStatusBar();
@@ -1171,9 +1430,4 @@ bootstrap().catch((error) => {
   applySendStatus({ state: "error", message: `App bootstrap failed: ${error}` });
   applyReceiverStatus({ state: "error", message: `App bootstrap failed: ${error}` });
 });
-
-
-
-
-
 

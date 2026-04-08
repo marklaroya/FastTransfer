@@ -40,6 +40,7 @@ body {
 
 button,
 input,
+select,
 summary,
 table {
   font: inherit;
@@ -65,7 +66,8 @@ button:disabled {
   cursor: not-allowed;
 }
 
-input {
+input,
+select {
   width: 100%;
   border: 1px solid var(--panel-border);
   border-radius: var(--radius-sm);
@@ -78,7 +80,8 @@ input::placeholder {
   color: var(--muted-soft);
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: none;
   border-color: var(--accent-line);
 }
@@ -449,6 +452,29 @@ svg {
   gap: 0.75rem;
 }
 
+
+.destination-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.destination-mode-button {
+  padding: 0.5rem 0.75rem;
+  background: #141418;
+  border-color: var(--panel-border);
+  font-size: 0.8rem;
+}
+
+.destination-mode-button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: #67e8f9;
+}
+
+.destination-panel {
+  margin-top: 0.9rem;
+}
 .mono-field {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -1221,7 +1247,8 @@ tbody td {
   align-items: stretch;
 }
 
-.inline-field input {
+.inline-field input,
+.inline-field select {
   flex: 1 1 auto;
   width: auto;
   min-width: 0;
@@ -1256,3 +1283,4 @@ tbody td {
     align-self: auto;
   }
 }
+

@@ -97,23 +97,69 @@
 
                   <div class="new-transfer-grid">
                     <div class="stack-column">
+                      <section class="card destination-card">
+                        <div class="section-label">Destination</div>
+                        <div class="destination-mode-row" role="group" aria-label="Destination type">
+                          <button id="destination-nearby" class="destination-mode-button active" data-destination-mode="nearby" type="button">Nearby device</button>
+                          <button id="destination-manual" class="destination-mode-button" data-destination-mode="manual" type="button">Manual address</button>
+                          <button id="destination-usb" class="destination-mode-button" data-destination-mode="usb" type="button">USB / External drive</button>
+                          <button id="destination-local" class="destination-mode-button" data-destination-mode="local" type="button">Local folder</button>
+                        </div>
+
+                        <div id="destination-nearby-panel" class="destination-panel">
+                          <p class="help-copy">Use a receiver discovered on your LAN from the Nearby devices list.</p>
+                        </div>
+
+                        <div id="destination-manual-panel" class="destination-panel" hidden>
+                          <div class="settings-inline-grid">
+                            <label>
+                              <span>Manual target</span>
+                              <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
+                            </label>
+                            <label>
+                              <span>Receiver certificate</span>
+                              <div class="inline-field">
+                                <input id="certificate-path" type="text" placeholder="receiver-cert.der" readonly />
+                                <button id="pick-certificate" type="button">Browse</button>
+                              </div>
+                            </label>
+                          </div>
+                        </div>
+
+                        <div id="destination-usb-panel" class="destination-panel" hidden>
+                          <div class="inline-field">
+                            <select id="usb-drive-select"></select>
+                            <button id="refresh-usb-drives" type="button">Refresh drives</button>
+                          </div>
+                          <p id="usb-drive-meta" class="help-copy">Select a removable drive to copy the package directly.</p>
+                        </div>
+
+                        <div id="destination-local-panel" class="destination-panel" hidden>
+                          <div class="inline-field">
+                            <input id="local-destination-path" type="text" placeholder="Choose destination folder" readonly />
+                            <button id="pick-local-destination" type="button">Browse</button>
+                          </div>
+                          <p class="help-copy">The package will be copied directly to this folder.</p>
+                        </div>
+                      </section>
+
                       <section class="card target-card">
-                        <div class="section-label">Selected device</div>
+                        <div class="section-label">Selected destination</div>
                         <div class="target-row">
                           <div>
-                            <div id="send-target-name" class="card-title">No device selected</div>
+                            <div id="send-target-name" class="card-title">No destination selected</div>
                             <div id="send-target-address" class="card-subtitle">Pending</div>
                           </div>
                           <span id="send-target-badge" class="pill">No target</span>
                         </div>
-                        <div id="send-target-message" class="card-copy">Choose a nearby device or use manual mode.</div>
+                        <div id="send-target-message" class="card-copy">Choose a destination to start a transfer.</div>
                         <div class="target-meta">
                           <div>
-                            <span>Fingerprint</span>
+                            <span>Identity / Drive</span>
                             <strong id="send-target-fingerprint">Pending</strong>
                           </div>
                           <div>
-                            <span>Trust</span>
+                            <span>Trust / Status</span>
                             <strong id="send-target-trust">Pending</strong>
                           </div>
                         </div>
@@ -163,23 +209,6 @@
                           <span class="chevron">&#9662;</span>
                         </summary>
                         <div class="advanced-body">
-                          <label class="toggle-row">
-                            <input id="manual-mode" type="checkbox" />
-                            <span>Use manual target mode instead of the selected nearby receiver</span>
-                          </label>
-                          <div class="settings-inline-grid">
-                            <label>
-                              <span>Manual target</span>
-                              <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
-                            </label>
-                            <label>
-                              <span>Receiver certificate</span>
-                              <div class="inline-field">
-                                <input id="certificate-path" type="text" placeholder="receiver-cert.der" readonly />
-                                <button id="pick-certificate" type="button">Browse</button>
-                              </div>
-                            </label>
-                          </div>
                           <label class="toggle-row">
                             <input id="auto-tune" type="checkbox" checked />
                             <span>Auto tune chunk size and parallelism (recommended)</span>

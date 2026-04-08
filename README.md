@@ -250,3 +250,35 @@ cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --source ./
 
 
 
+
+## Desktop Destination Modes
+
+The desktop Send view now supports four destination types:
+
+- Nearby device (default LAN flow with discovery and automatic certificate trust)
+- Manual address (advanced fallback with explicit certificate path)
+- USB / external drive (direct local copy to removable media)
+- Local folder (direct local copy to any selected folder)
+
+For USB and local-folder modes, FastTransfer now uses a destination-sink pipeline in `transfer-core` (`LanSink`, `LocalFolderSink`, `UsbDriveSink`) and streams file data directly to disk without loading whole packages into memory.
+
+Safety checks before local copy starts:
+
+- free-space check on the destination volume
+- FAT32 4 GiB single-file limit detection with a clear error message
+- removable-drive type validation for USB mode
+- runtime detection if a USB drive is removed during transfer
+- permission and filesystem write errors are surfaced as transfer failures
+
+The desktop app reuses the same package summary, transfer progress, and transfer queue UI for LAN and local copy destinations.
+
+## Desktop Local Copy Test Flow
+
+1. Open the desktop app and go to `Send`.
+2. Choose a source file or folder.
+3. Select `USB / External drive` or `Local folder` as the destination mode.
+4. For USB mode, refresh and pick a removable drive.
+5. For local-folder mode, browse and pick a destination folder.
+6. Click `Send package`.
+7. Verify progress updates (current file, overall bytes/files, speed) and confirm files arrive with preserved folder structure.
+

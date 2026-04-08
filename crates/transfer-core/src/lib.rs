@@ -3,6 +3,7 @@
 mod file_io;
 mod progress;
 mod streaming;
+mod local_copy;
 
 use std::{
     collections::BTreeSet,
@@ -31,6 +32,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 pub use file_io::SourceInspection as TransferSourceSummary;
 pub use progress::ProgressUpdate as TransferProgress;
+pub use local_copy::{LocalCopyRequest, LocalDestinationKind};
 pub const DEFAULT_CHUNK_SIZE: u32 = 4_194_304;
 pub const DEFAULT_PARALLELISM: usize = 8;
 
@@ -175,6 +177,68 @@ impl SendRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LanSink {
+    pub request: SendRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalFolderSink {
+    pub request: LocalCopyRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsbDriveSink {
+    pub request: LocalCopyRequest,
+}
+
+#[derive(Debug, Clone)]
+pub enum DestinationSink {
+    Lan(LanSink),
+    LocalFolder(LocalFolderSink),
+    UsbDrive(UsbDriveSink),
+}
+
+impl DestinationSink {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Lan(_) => "lan",
+            Self::LocalFolder(_) => "local_folder",
+            Self::UsbDrive(_) => "usb_drive",
+        }
+    }
+
+    async fn run_with_listener(
+        self,
+        progress_listener: Option<ProgressListener>,
+        render_terminal: bool,
+    ) -> Result<TransferSummary> {
+        match self {
+            Self::Lan(sink) => send_file_internal(sink.request, progress_listener, render_terminal).await,
+            Self::LocalFolder(sink) => {
+                local_copy::copy_local_streaming(sink.request, progress_listener, render_terminal).await
+            }
+            Self::UsbDrive(sink) => {
+                local_copy::copy_local_streaming(sink.request, progress_listener, render_terminal).await
+            }
+        }
+    }
+}
+
+pub async fn run_destination_sink(sink: DestinationSink) -> Result<TransferSummary> {
+    sink.run_with_listener(None, true).await
+}
+
+pub async fn run_destination_sink_with_progress<F>(
+    sink: DestinationSink,
+    on_progress: F,
+) -> Result<TransferSummary>
+where
+    F: Fn(TransferProgress) + Send + Sync + 'static,
+{
+    sink.run_with_listener(Some(Arc::new(on_progress)), false)
+        .await
+}
 #[derive(Debug, Clone)]
 pub struct DiscoveredSendRequest {
     pub receiver: NearbyReceiver,
@@ -386,6 +450,19 @@ where
     F: Fn(TransferProgress) + Send + Sync + 'static,
 {
     send_file_internal(request, Some(Arc::new(on_progress)), false).await
+}
+pub async fn copy_to_local(request: LocalCopyRequest) -> Result<TransferSummary> {
+    local_copy::copy_local_streaming(request, None, true).await
+}
+
+pub async fn copy_to_local_with_progress<F>(
+    request: LocalCopyRequest,
+    on_progress: F,
+) -> Result<TransferSummary>
+where
+    F: Fn(TransferProgress) + Send + Sync + 'static,
+{
+    local_copy::copy_local_streaming(request, Some(Arc::new(on_progress)), false).await
 }
 
 async fn send_file_internal(
@@ -754,8 +831,4 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
-
-
-
-
 
