@@ -1,0 +1,17 @@
+﻿[package]
+name = "quic-transport"
+description = "QUIC transport boundary for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+protocol.workspace = true
+quic.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+
+[lints]
+workspace = true

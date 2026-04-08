@@ -1,0 +1,13 @@
+﻿[package]
+name = "integrity"
+description = "Integrity helpers for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

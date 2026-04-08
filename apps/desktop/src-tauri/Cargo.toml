@@ -1,0 +1,23 @@
+[package]
+name = "fasttransfer-desktop"
+version = "0.1.0"
+description = "Minimal Tauri desktop shell for FastTransfer."
+edition = "2021"
+rust-version = "1.76"
+license = "MIT"
+default-run = "fasttransfer-desktop"
+
+[build-dependencies]
+tauri-build = { version = "2.2.2" }
+
+[dependencies]
+anyhow = "1.0.95"
+discovery = { path = "../../../crates/discovery" }
+rfd = "0.15.2"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+tauri = { version = "2.2.2" }
+transfer-core = { path = "../../../crates/transfer-core" }
+
+[workspace]
+

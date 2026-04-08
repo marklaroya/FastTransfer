@@ -1,0 +1,14 @@
+﻿[package]
+name = "resume"
+description = "Resume state management for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+integrity.workspace = true
+protocol.workspace = true
+
+[lints]
+workspace = true

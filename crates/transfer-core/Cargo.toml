@@ -1,0 +1,21 @@
+﻿[package]
+name = "transfer-core"
+description = "Top-level transfer orchestration for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chunker.workspace = true
+clap.workspace = true
+discovery.workspace = true
+integrity.workspace = true
+protocol.workspace = true
+quic-transport.workspace = true
+resume.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,84 @@
+﻿# =========================
+# OS / General
+# =========================
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# =========================
+# Rust
+# =========================
+target/
+debug/
+**/*.rs.bk
+*.pdb
+
+# =========================
+# Tauri (desktop)
+# =========================
+**/src-tauri/target/
+**/src-tauri/tauri.conf.json.local
+
+# =========================
+# Flutter (mobile)
+# =========================
+.build/
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Android
+android/.gradle/
+android/app/build/
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# =========================
+# Go (backend)
+# =========================
+bin/
+pkg/
+*.exe
+*.test
+*.out
+
+# =========================
+# Node (Tauri UI)
+# =========================
+node_modules/
+dist/
+build/
+
+# =========================
+# IDEs
+# =========================
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# Env / secrets
+# =========================
+.env
+.env.*
+*.key
+*.pem
+
+# =========================
+# Logs / runtime
+# =========================
+logs/
+
+# =========================
+# Coverage / temp
+# =========================
+coverage/
+*.lcov

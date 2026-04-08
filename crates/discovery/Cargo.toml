@@ -1,0 +1,14 @@
+[package]
+name = "discovery"
+description = "Peer discovery models for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mdns-sd.workspace = true
+
+[lints]
+workspace = true

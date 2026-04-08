@@ -1,0 +1,13 @@
+﻿[package]
+name = "protocol"
+description = "Shared protocol types for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+integrity.workspace = true
+
+[lints]
+workspace = true

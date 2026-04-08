@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/protocol",
+    "crates/chunker",
+    "crates/integrity",
+    "crates/resume",
+    "crates/discovery",
+    "crates/quic-transport",
+    "crates/transfer-core",
+]
+default-members = ["crates/transfer-core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/your-org/fasttransfer"
+rust-version = "1.76"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0.95"
+chunker = { path = "crates/chunker" }
+clap = { version = "4.5.30", features = ["derive"] }
+discovery = { path = "crates/discovery" }
+integrity = { path = "crates/integrity" }
+mdns-sd = "0.18.2"
+protocol = { path = "crates/protocol" }
+quic = { package = "quinn", version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quic-transport = { path = "crates/quic-transport" }
+rcgen = { version = "0.13.2", features = ["crypto"] }
+resume = { path = "crates/resume" }
+sha2 = "0.10.8"
+rustls = { version = "0.23.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.43.0", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+transfer-core = { path = "crates/transfer-core" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+unused_crate_dependencies = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

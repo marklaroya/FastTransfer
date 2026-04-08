@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FastTransfer Desktop</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+    <script type="module" src="./src/main.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">FastTransfer Desktop</p>
+        <h1>Nearby send and receive for the existing QUIC engine.</h1>
+        <p class="lede">
+          This Tauri shell sits on top of the Rust transfer core, keeps device discovery local,
+          and gives you a compact sender and receiver workflow for desktop testing.
+        </p>
+      </section>
+
+      <section class="grid">
+        <article class="panel sender-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Sender</p>
+              <h2>Send a file</h2>
+            </div>
+            <button id="refresh-devices" class="secondary-button">Refresh devices</button>
+          </div>
+
+          <label class="field">
+            <span>Source file</span>
+            <div class="inline-input">
+              <input id="source-path" type="text" placeholder="Pick a file to send" readonly />
+              <button id="pick-source" type="button">Browse</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>Receiver certificate</span>
+            <div class="inline-input">
+              <input id="certificate-path" type="text" placeholder="Pick receiver-cert.der" readonly />
+              <button id="pick-certificate" type="button">Browse</button>
+            </div>
+          </label>
+
+          <div class="field">
+            <span>Nearby receivers</span>
+            <div id="nearby-devices" class="device-list empty-state">
+              No nearby receivers yet. Start the receiver view below and refresh.
+            </div>
+          </div>
+
+          <label class="field">
+            <span>Manual target</span>
+            <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
+          </label>
+
+          <div class="settings-grid">
+            <label class="field compact">
+              <span>Server name</span>
+              <input id="server-name" type="text" value="fasttransfer.local" />
+            </label>
+            <label class="field compact">
+              <span>Chunk size</span>
+              <input id="chunk-size" type="number" min="1" step="1" value="1048576" />
+            </label>
+            <label class="field compact">
+              <span>Parallelism</span>
+              <input id="parallelism" type="number" min="1" step="1" value="4" />
+            </label>
+          </div>
+
+          <div class="actions">
+            <button id="send-button" class="primary-button">Send file</button>
+          </div>
+
+          <div class="status-card">
+            <div class="status-row">
+              <span class="status-label">Send status</span>
+              <span id="send-badge" class="badge idle">Idle</span>
+            </div>
+            <p id="send-message" class="status-copy">Choose a file, select a certificate, and target a receiver.</p>
+            <div class="progress-block">
+              <div class="progress-track"><div id="send-progress-bar" class="progress-fill"></div></div>
+              <div class="progress-meta">
+                <span id="send-progress-text">0%</span>
+                <span id="send-speed">0.00 MiB/s</span>
+              </div>
+            </div>
+            <dl class="summary-grid">
+              <div>
+                <dt>File</dt>
+                <dd id="send-summary-file">Not started</dd>
+              </div>
+              <div>
+                <dt>Transferred</dt>
+                <dd id="send-summary-bytes">0 B</dd>
+              </div>
+              <div>
+                <dt>Chunks</dt>
+                <dd id="send-summary-chunks">0</dd>
+              </div>
+              <div>
+                <dt>SHA-256</dt>
+                <dd id="send-summary-hash">Pending</dd>
+              </div>
+            </dl>
+          </div>
+        </article>
+
+        <article class="panel receiver-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Receiver</p>
+              <h2>Listen for incoming transfers</h2>
+            </div>
+            <button id="start-receiver" class="secondary-button">Start receiver</button>
+          </div>
+
+          <label class="field">
+            <span>Advertised device name</span>
+            <input id="device-name" type="text" placeholder="Office Laptop" />
+          </label>
+
+          <div class="status-card receiver-status-card">
+            <div class="status-row">
+              <span class="status-label">Receive status</span>
+              <span id="receiver-badge" class="badge idle">Idle</span>
+            </div>
+            <p id="receiver-message" class="status-copy">Start the receiver to advertise over mDNS and wait for a sender.</p>
+            <div class="progress-block">
+              <div class="progress-track"><div id="receiver-progress-bar" class="progress-fill"></div></div>
+              <div class="progress-meta">
+                <span id="receiver-progress-text">0%</span>
+                <span id="receiver-speed">0.00 MiB/s</span>
+              </div>
+            </div>
+            <dl class="summary-grid">
+              <div>
+                <dt>Listening</dt>
+                <dd id="receiver-bind">Not started</dd>
+              </div>
+              <div>
+                <dt>Output</dt>
+                <dd id="receiver-output">Pending</dd>
+              </div>
+              <div>
+                <dt>Last file</dt>
+                <dd id="receiver-file">None yet</dd>
+              </div>
+              <div>
+                <dt>Saved path</dt>
+                <dd id="receiver-saved-path">Pending</dd>
+              </div>
+            </dl>
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

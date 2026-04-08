@@ -1,0 +1,13 @@
+﻿[package]
+name = "chunker"
+description = "Chunk planning for FastTransfer."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+protocol.workspace = true
+
+[lints]
+workspace = true
