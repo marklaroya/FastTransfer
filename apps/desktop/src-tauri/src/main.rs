@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 use transfer_core::{
     assess_discovered_receiver, bind_receiver, ensure_preferred_receive_dir,
     inspect_transfer_source, prepare_discovered_send_request, preferred_receive_dir_label,
+    recommend_transfer_tuning,
     send_file_with_progress, DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport,
     ReceiverTrustState, SendRequest, TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE,
     DEFAULT_PARALLELISM,
@@ -119,6 +120,10 @@ struct PackageSummaryPayload {
     total_files: u64,
     total_directories: u64,
     total_bytes: u64,
+    recommended_chunk_size: u32,
+    recommended_parallelism: usize,
+    tuning_profile: String,
+    tuning_reason: String,
 }
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -220,12 +225,17 @@ async fn inspect_source(source_path: String) -> Result<PackageSummaryPayload, St
     let summary = inspect_transfer_source(source_path.as_path())
         .await
         .map_err(format_error)?;
+    let tuning = recommend_transfer_tuning(&summary);
     Ok(PackageSummaryPayload {
         root_name: summary.root_name,
         root_kind: format!("{:?}", summary.root_kind).to_lowercase(),
         total_files: summary.total_files,
         total_directories: summary.total_directories,
         total_bytes: summary.total_bytes,
+        recommended_chunk_size: tuning.chunk_size,
+        recommended_parallelism: tuning.parallelism,
+        tuning_profile: tuning.profile.as_str().to_owned(),
+        tuning_reason: tuning.reason,
     })
 }
 
@@ -723,10 +733,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
-
-
-
-
-
-
-

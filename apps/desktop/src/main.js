@@ -51,6 +51,8 @@ const elements = {
   serverName: $("#server-name"),
   chunkSize: $("#chunk-size"),
   parallelism: $("#parallelism"),
+  autoTune: $("#auto-tune"),
+  autoTuneSummary: $("#auto-tune-summary"),
   sendButton: $("#send-button"),
 
   sendBadge: $("#send-badge"),
@@ -235,6 +237,86 @@ function packageKindBadgeLabel(rootKind) {
   return "Unknown";
 }
 
+function recommendedTransferTuning(summary) {
+  const defaultTuning = {
+    chunkSize: 4194304,
+    parallelism: 8,
+    profile: "mixed",
+    reason: "Balanced defaults for local gigabit LAN.",
+  };
+
+  if (!summary) {
+    return defaultTuning;
+  }
+
+  return {
+    chunkSize: Math.max(1, Number(summary.recommendedChunkSize ?? defaultTuning.chunkSize)),
+    parallelism: Math.max(1, Number(summary.recommendedParallelism ?? defaultTuning.parallelism)),
+    profile: String(summary.tuningProfile ?? defaultTuning.profile),
+    reason: String(summary.tuningReason ?? defaultTuning.reason),
+  };
+}
+
+function tuningProfileLabel(profile) {
+  if (profile === "tiny_transfer") return "Tiny transfer";
+  if (profile === "many_small_files") return "Many small files";
+  if (profile === "large_files") return "Large files";
+  if (profile === "mixed") return "Mixed workload";
+  return "Auto";
+}
+
+function activeTransferTuning() {
+  const recommended = recommendedTransferTuning(appState.sourceSummary);
+  const auto = elements.autoTune.checked;
+
+  if (auto) {
+    return {
+      chunkSize: recommended.chunkSize,
+      parallelism: recommended.parallelism,
+      mode: "auto",
+      profile: recommended.profile,
+      reason: recommended.reason,
+    };
+  }
+
+  return {
+    chunkSize: Math.max(1, Number(elements.chunkSize.value || recommended.chunkSize)),
+    parallelism: Math.max(1, Number(elements.parallelism.value || recommended.parallelism)),
+    mode: "manual",
+    profile: recommended.profile,
+    reason: recommended.reason,
+  };
+}
+
+function renderTransferTuning() {
+  const recommended = recommendedTransferTuning(appState.sourceSummary);
+  const auto = elements.autoTune.checked;
+
+  if (auto) {
+    elements.chunkSize.value = String(recommended.chunkSize);
+    elements.parallelism.value = String(recommended.parallelism);
+  }
+
+  elements.chunkSize.disabled = auto;
+  elements.parallelism.disabled = auto;
+
+  const chunkText = formatBytes(recommended.chunkSize);
+  if (!appState.sourceSummary) {
+    elements.autoTuneSummary.textContent = auto
+      ? `Auto tune is active. Waiting for a selected package to pick chunk size and parallelism.`
+      : `Manual mode is active. Recommended baseline is ${chunkText} chunks with parallelism ${recommended.parallelism}.`;
+    return;
+  }
+
+  const profileText = tuningProfileLabel(recommended.profile);
+  if (auto) {
+    elements.autoTuneSummary.textContent = `Auto tune active (${profileText}): using ${chunkText} chunks, parallelism ${recommended.parallelism}. ${recommended.reason}`;
+    return;
+  }
+
+  elements.autoTuneSummary.textContent = `Manual override active. Current values are ${formatBytes(Math.max(1, Number(elements.chunkSize.value || recommended.chunkSize)))} chunks and parallelism ${Math.max(1, Number(elements.parallelism.value || recommended.parallelism))}. Auto recommendation (${profileText}) is ${chunkText} / ${recommended.parallelism}.`;
+}
+
 function stateLabel(state) {
   if (state === "starting") return "Starting";
   if (state === "scanning") return "Scanning";
@@ -342,7 +424,7 @@ function renderPackageSummary() {
   elements.packageSummaryMessage.textContent = `Ready to send ${summary.rootName} with ${Number(summary.totalFiles).toLocaleString()} file${Number(summary.totalFiles) === 1 ? "" : "s"}.`;
   if (!appState.sendBusy) {
     elements.sendSummaryFile.textContent = summary.rootName;
-    elements.sendSummaryMeta.textContent = `${formatBytes(summary.totalBytes)} • ${packageKindLabel(summary.rootKind)}`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(summary.totalBytes)} - ${packageKindLabel(summary.rootKind)}`;
   }
 }
 
@@ -350,6 +432,7 @@ async function setSourcePath(path) {
   elements.sourcePath.value = path;
   appState.sourceSummary = null;
   renderPackageSummary();
+  renderTransferTuning();
 
   try {
     const summary = await invoke("inspect_source", { sourcePath: path });
@@ -509,7 +592,7 @@ function renderDeviceLists() {
           <div class="trusted-item">
             <strong>${escapeHtml(device.deviceName)}</strong>
             <span>${escapeHtml(trustLabel(device.trustState))}</span>
-            <span>${escapeHtml(device.shortFingerprint)} • ${escapeHtml(device.addresses[0] ?? "No address")}</span>
+            <span>${escapeHtml(device.shortFingerprint)} - ${escapeHtml(device.addresses[0] ?? "No address")}</span>
           </div>
         `,
       )
@@ -630,6 +713,7 @@ function syncOverflowTitles() {
     "#package-root-name",
     "#package-root-kind",
     "#package-summary-message",
+    "#auto-tune-summary",
     "#send-summary-file",
     "#send-summary-meta",
     "#send-summary-hash",
@@ -699,12 +783,13 @@ function updateStatusBar() {
     ? `Receiver listening on ${appState.receiverBindAddr}`
     : "Receiver stopped";
   elements.statusRight.textContent = activeProgress
-    ? `${activeProgress.status} • ${activeProgress.speed}`
+    ? `${activeProgress.status} - ${activeProgress.speed}`
     : (elements.manualMode.checked ? (elements.targetAddress.value.trim() || "Manual target") : (selectedDevice()?.deviceName || "No target selected"));
 }
 
 function renderAll() {
   renderPackageSummary();
+  renderTransferTuning();
   renderSelectedTarget();
   renderDeviceIdentity();
   renderDeviceLists();
@@ -716,6 +801,7 @@ function renderAll() {
   updateStatusBar();
   syncOverflowTitles();
 }
+
 async function refreshDevices() {
   const timeout = Number(elements.settingsDiscoveryTimeout.value || 3);
   const discoveryEnabled = elements.settingsLanDiscovery.checked;
@@ -811,6 +897,8 @@ async function startSend() {
     return;
   }
 
+  const tuning = activeTransferTuning();
+
   try {
     await invoke("start_send", {
       request: {
@@ -819,8 +907,8 @@ async function startSend() {
         targetAddr: elements.manualMode.checked ? elements.targetAddress.value.trim() : null,
         certificatePath: elements.manualMode.checked ? elements.certificatePath.value : null,
         serverName: elements.serverName.value.trim() || "fasttransfer.local",
-        chunkSize: Number(elements.chunkSize.value || 4194304),
-        parallelism: Number(elements.parallelism.value || 8),
+        chunkSize: tuning.chunkSize,
+        parallelism: tuning.parallelism,
       },
     });
 
@@ -855,7 +943,7 @@ function applySendStatus(payload) {
   if (payload.progress) {
     applyProgress(elements.sendProgressBar, elements.sendProgressText, elements.sendSpeed, payload.progress);
     elements.sendSummaryFile.textContent = appState.sourceSummary?.rootName ?? basename(elements.sourcePath.value) ?? "Outgoing package";
-    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} • ${selectedDevice()?.deviceName ?? (elements.targetAddress.value.trim() || "Manual target")}`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} - ${selectedDevice()?.deviceName ?? (elements.targetAddress.value.trim() || "Manual target")}`;
     elements.sendSummaryBytes.textContent = `${formatBytes(payload.progress.transferredBytes)} / ${formatBytes(payload.progress.totalBytes)}`;
     elements.sendSummaryChunks.textContent = `${payload.progress.completedFiles} / ${payload.progress.totalFiles}`;
     elements.sendSummaryHash.textContent = payload.progress.currentPath || (payload.progress.phase === "scanning" ? "Scanning files..." : "Preparing files");
@@ -863,7 +951,7 @@ function applySendStatus(payload) {
 
   if (payload.summary) {
     elements.sendSummaryFile.textContent = payload.summary.fileName;
-    elements.sendSummaryMeta.textContent = `${formatBytes(payload.summary.bytesTransferred)} • ${payload.summary.elapsedSecs.toFixed(1)}s`;
+    elements.sendSummaryMeta.textContent = `${formatBytes(payload.summary.bytesTransferred)} - ${payload.summary.elapsedSecs.toFixed(1)}s`;
     elements.sendSummaryBytes.textContent = formatBytes(payload.summary.bytesTransferred);
     elements.sendSummaryChunks.textContent = `${payload.summary.completedFiles} file${payload.summary.completedFiles === 1 ? "" : "s"}`;
     elements.sendSummaryHash.textContent = payload.summary.integrityVerified ? "Verified" : payload.summary.sha256Hex;
@@ -1049,6 +1137,17 @@ function wireEvents() {
   elements.targetAddress.addEventListener("input", () => {
     renderSelectedTarget();
     updateStatusBar();
+  });
+  elements.autoTune.addEventListener("change", renderTransferTuning);
+  elements.chunkSize.addEventListener("input", () => {
+    if (!elements.autoTune.checked) {
+      renderTransferTuning();
+    }
+  });
+  elements.parallelism.addEventListener("input", () => {
+    if (!elements.autoTune.checked) {
+      renderTransferTuning();
+    }
   });
 
   elements.sendButton.addEventListener("click", startSend);

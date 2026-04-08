@@ -34,6 +34,110 @@ pub use progress::ProgressUpdate as TransferProgress;
 pub const DEFAULT_CHUNK_SIZE: u32 = 4_194_304;
 pub const DEFAULT_PARALLELISM: usize = 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoTuneProfile {
+    TinyTransfer,
+    ManySmallFiles,
+    LargeFiles,
+    Mixed,
+}
+
+impl AutoTuneProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TinyTransfer => "tiny_transfer",
+            Self::ManySmallFiles => "many_small_files",
+            Self::LargeFiles => "large_files",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AutoTuneSettings {
+    pub chunk_size: u32,
+    pub parallelism: usize,
+    pub profile: AutoTuneProfile,
+    pub reason: String,
+}
+
+pub fn recommend_transfer_tuning(summary: &TransferSourceSummary) -> AutoTuneSettings {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+
+    let avg_file_size = if summary.total_files == 0 {
+        0
+    } else {
+        summary.total_bytes / summary.total_files
+    };
+
+    let tiny_transfer = summary.total_bytes <= 128 * MIB;
+    let many_small_files = summary.total_files >= 1_500
+        || (summary.total_files >= 200 && avg_file_size <= 512 * KIB);
+    let very_large_files = avg_file_size >= 64 * MIB || summary.total_bytes >= 16 * GIB;
+    let large_file_heavy = summary.total_files <= 256 && avg_file_size >= 8 * MIB;
+
+    if tiny_transfer {
+        return AutoTuneSettings {
+            chunk_size: 1_048_576,
+            parallelism: 4,
+            profile: AutoTuneProfile::TinyTransfer,
+            reason: format!(
+                "Small transfer detected ({} bytes across {} files).",
+                summary.total_bytes, summary.total_files
+            ),
+        };
+    }
+
+    if many_small_files {
+        return AutoTuneSettings {
+            chunk_size: 1_048_576,
+            parallelism: 6,
+            profile: AutoTuneProfile::ManySmallFiles,
+            reason: format!(
+                "Many small files detected ({} files, average {} bytes per file).",
+                summary.total_files, avg_file_size
+            ),
+        };
+    }
+
+    if very_large_files {
+        return AutoTuneSettings {
+            chunk_size: 8_388_608,
+            parallelism: 8,
+            profile: AutoTuneProfile::LargeFiles,
+            reason: format!(
+                "Very large payload profile detected ({} bytes total, average {} bytes per file).",
+                summary.total_bytes, avg_file_size
+            ),
+        };
+    }
+
+    if large_file_heavy {
+        return AutoTuneSettings {
+            chunk_size: 4_194_304,
+            parallelism: 8,
+            profile: AutoTuneProfile::LargeFiles,
+            reason: format!(
+                "Large-file workload detected ({} files, average {} bytes per file).",
+                summary.total_files, avg_file_size
+            ),
+        };
+    }
+
+    AutoTuneSettings {
+        chunk_size: 2_097_152,
+        parallelism: 6,
+        profile: AutoTuneProfile::Mixed,
+        reason: format!(
+            "Mixed workload detected ({} files, average {} bytes per file).",
+            summary.total_files, avg_file_size
+        ),
+    }
+}
+
+
 #[derive(Debug)]
 pub struct TransferPlan {
     pub session: TransferSession,
@@ -650,6 +754,7 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
+
 
 
 
