@@ -82,3 +82,11 @@ logs/
 # =========================
 coverage/
 *.lcov
+
+# Tauri dev/build artifacts
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/.tauri/
+
+# Frontend temp (Tauri)
+apps/desktop/.vite/
+apps/desktop/.cache/
