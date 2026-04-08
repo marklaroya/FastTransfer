@@ -5,6 +5,7 @@ mod progress;
 
 use std::{
     collections::BTreeSet,
+    fs as stdfs,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,7 +14,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use chunker::FixedChunker;
-use discovery::{local_loopback_advertisement, PeerAdvertisement};
+use discovery::{local_loopback_advertisement, short_fingerprint, NearbyReceiver, PeerAdvertisement};
 use integrity::{format_sha256, sha256_bytes, sha256_file, verify_sha256, IntegrityReport};
 use progress::{ProgressListener, ProgressReporter};
 use protocol::{
@@ -25,7 +26,7 @@ use quic_transport::{
 };
 use resume::{PersistentResumeState, ResumeState};
 use tokio::{
-    fs,
+    fs as tokio_fs,
     sync::Semaphore,
     task::{spawn_blocking, JoinSet},
 };
@@ -70,6 +71,44 @@ impl SendRequest {
             parallelism: DEFAULT_PARALLELISM,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredSendRequest {
+    pub receiver: NearbyReceiver,
+    pub source_path: PathBuf,
+    pub trust_cache_dir: PathBuf,
+    pub server_addr: Option<SocketAddr>,
+    pub server_name: String,
+    pub chunk_size: u32,
+    pub parallelism: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverTrustState {
+    TrustedForSession,
+    KnownDevice,
+    FingerprintMismatch,
+}
+
+impl ReceiverTrustState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TrustedForSession => "trusted_for_session",
+            Self::KnownDevice => "known_device",
+            Self::FingerprintMismatch => "fingerprint_mismatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceiverTrustReport {
+    pub peer_id: String,
+    pub device_name: String,
+    pub fingerprint_hex: String,
+    pub short_fingerprint: String,
+    pub state: ReceiverTrustState,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +305,83 @@ impl ReceiverApp {
     }
 }
 
+pub fn assess_discovered_receiver(receiver: &NearbyReceiver, trust_cache_dir: &Path) -> Result<ReceiverTrustReport> {
+    if receiver.certificate_der.is_empty() {
+        bail!("discovered receiver {} did not include a certificate", receiver.device_name);
+    }
+
+    let actual_fingerprint = format_sha256(&sha256_bytes(&receiver.certificate_der));
+    if actual_fingerprint != receiver.certificate_sha256_hex {
+        bail!(
+            "discovered receiver {} advertised fingerprint {} but the certificate hashes to {}",
+            receiver.device_name,
+            receiver.certificate_sha256_hex,
+            actual_fingerprint
+        );
+    }
+
+    let cached_fingerprint = read_cached_fingerprint(trust_cache_dir, &receiver.peer_id)?;
+    let short_fingerprint_value = short_fingerprint(&receiver.certificate_sha256_hex);
+
+    let (state, message) = match cached_fingerprint {
+        None => (
+            ReceiverTrustState::TrustedForSession,
+            format!(
+                "{} ({short_fingerprint_value}) is trusted for this session via LAN discovery.",
+                receiver.device_name
+            ),
+        ),
+        Some(cached) if cached == receiver.certificate_sha256_hex => (
+            ReceiverTrustState::KnownDevice,
+            format!("Known device {} ({short_fingerprint_value}).", receiver.device_name),
+        ),
+        Some(cached) => (
+            ReceiverTrustState::FingerprintMismatch,
+            format!(
+                "Device fingerprint changed for {}: expected {}, discovered {}.",
+                receiver.device_name,
+                short_fingerprint(&cached),
+                short_fingerprint_value
+            ),
+        ),
+    };
+
+    Ok(ReceiverTrustReport {
+        peer_id: receiver.peer_id.clone(),
+        device_name: receiver.device_name.clone(),
+        fingerprint_hex: receiver.certificate_sha256_hex.clone(),
+        short_fingerprint: short_fingerprint_value,
+        state,
+        message,
+    })
+}
+
+pub fn prepare_discovered_send_request(request: DiscoveredSendRequest) -> Result<(SendRequest, ReceiverTrustReport)> {
+    let trust = assess_discovered_receiver(&request.receiver, &request.trust_cache_dir)?;
+    if trust.state == ReceiverTrustState::FingerprintMismatch {
+        bail!(trust.message.clone());
+    }
+
+    let cert_path = persist_discovered_certificate(&request.receiver, &request.trust_cache_dir)?;
+    persist_trust_cache(&request.receiver, &request.trust_cache_dir)?;
+    let server_addr = request
+        .server_addr
+        .or_else(|| request.receiver.primary_address())
+        .with_context(|| format!("discovered receiver {} did not publish any reachable addresses", request.receiver.device_name))?;
+
+    Ok((
+        SendRequest {
+            server_addr,
+            source_path: request.source_path,
+            certificate_path: cert_path,
+            server_name: request.server_name,
+            chunk_size: request.chunk_size,
+            parallelism: request.parallelism,
+        },
+        trust,
+    ))
+}
+
 pub fn bind_receiver(request: ReceiveRequest) -> Result<ReceiverApp> {
     let transport = QuicReceiver::bind(request.bind_addr, request.cert_path, request.key_path)?;
     Ok(ReceiverApp {
@@ -290,7 +406,7 @@ async fn send_file_internal(
     progress_listener: Option<ProgressListener>,
     render_terminal: bool,
 ) -> Result<TransferSummary> {
-    let source_metadata = fs::metadata(&request.source_path)
+    let source_metadata = tokio_fs::metadata(&request.source_path)
         .await
         .with_context(|| format!("failed to read source metadata for {}", request.source_path.display()))?;
     if !source_metadata.is_file() {
@@ -465,6 +581,71 @@ fn sender_checkpoint_base_dir(source_path: &Path) -> &Path {
     source_path.parent().unwrap_or_else(|| Path::new("."))
 }
 
+fn trust_cache_file(trust_cache_dir: &Path, peer_id: &str) -> PathBuf {
+    trust_cache_dir.join("receivers").join(format!("{}.trust", sanitize_id(peer_id)))
+}
+
+fn receiver_certificate_file(trust_cache_dir: &Path, peer_id: &str) -> PathBuf {
+    trust_cache_dir.join("certs").join(format!("{}.der", sanitize_id(peer_id)))
+}
+
+fn sanitize_id(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+        } else if sanitized.is_empty() || !sanitized.ends_with('-') {
+            sanitized.push('-');
+        }
+    }
+    sanitized.trim_matches('-').to_owned()
+}
+
+fn read_cached_fingerprint(trust_cache_dir: &Path, peer_id: &str) -> Result<Option<String>> {
+    let cache_path = trust_cache_file(trust_cache_dir, peer_id);
+    if !cache_path.exists() {
+        return Ok(None);
+    }
+
+    let content = stdfs::read_to_string(&cache_path)
+        .with_context(|| format!("failed to read receiver trust cache {}", cache_path.display()))?;
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("fingerprint=") {
+            return Ok(Some(value.trim().to_owned()));
+        }
+    }
+
+    bail!("receiver trust cache {} is missing a fingerprint entry", cache_path.display())
+}
+
+fn persist_trust_cache(receiver: &NearbyReceiver, trust_cache_dir: &Path) -> Result<()> {
+    let cache_path = trust_cache_file(trust_cache_dir, &receiver.peer_id);
+    if let Some(parent) = cache_path.parent() {
+        stdfs::create_dir_all(parent)
+            .with_context(|| format!("failed to create receiver trust directory {}", parent.display()))?;
+    }
+
+    let content = format!(
+        "peer_id={}\ndevice_name={}\nfingerprint={}\n",
+        receiver.peer_id,
+        receiver.device_name,
+        receiver.certificate_sha256_hex,
+    );
+    stdfs::write(&cache_path, content)
+        .with_context(|| format!("failed to write receiver trust cache {}", cache_path.display()))
+}
+
+fn persist_discovered_certificate(receiver: &NearbyReceiver, trust_cache_dir: &Path) -> Result<PathBuf> {
+    let cert_path = receiver_certificate_file(trust_cache_dir, &receiver.peer_id);
+    if let Some(parent) = cert_path.parent() {
+        stdfs::create_dir_all(parent)
+            .with_context(|| format!("failed to create receiver certificate cache {}", parent.display()))?;
+    }
+    stdfs::write(&cert_path, &receiver.certificate_der)
+        .with_context(|| format!("failed to write receiver certificate {}", cert_path.display()))?;
+    Ok(cert_path)
+}
+
 fn descriptors_for_manifest(manifest: &TransferManifest) -> Vec<ChunkDescriptor> {
     FixedChunker::new(manifest.file_size, manifest.chunk_size).descriptors()
 }
@@ -557,3 +738,6 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
+
+
+

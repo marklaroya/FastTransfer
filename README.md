@@ -1,4 +1,4 @@
-# FastTransfer Monorepo
+ï»¿# FastTransfer Monorepo
 
 FastTransfer is a P2P-first cross-platform file transfer system focused on high-throughput, resumable, integrity-checked transfers across Android, iOS, and desktop platforms.
 
@@ -15,19 +15,19 @@ FastTransfer is a P2P-first cross-platform file transfer system focused on high-
 ```text
 FastTransfer/
 +-- apps/
-¦   +-- desktop/
-¦   +-- mobile/
+|   +-- desktop/
+|   +-- mobile/
 +-- crates/
-¦   +-- chunker/
-¦   +-- discovery/
-¦   +-- integrity/
-¦   +-- protocol/
-¦   +-- quic-transport/
-¦   +-- resume/
-¦   +-- transfer-core/
+|   +-- chunker/
+|   +-- discovery/
+|   +-- integrity/
+|   +-- protocol/
+|   +-- quic-transport/
+|   +-- resume/
+|   +-- transfer-core/
 +-- services/
-¦   +-- control-plane/
-¦   +-- relay/
+|   +-- control-plane/
+|   +-- relay/
 +-- .cargo/
 +-- Cargo.toml
 +-- README.md
@@ -72,12 +72,13 @@ Send a file to a specific receiver:
 cargo run -p transfer-core --bin ft-send -- send --to 127.0.0.1:5000 --file ./path/to/big-file.iso --cert ./.fasttransfer/certs/receiver-cert.der --chunk-size 1048576 --parallelism 4
 ```
 
-If sender and receiver are on different machines, copy `receiver-cert.der` to the sender machine and pass that path to `--cert`.
+For the Rust CLI prototype, manual target mode still expects the receiver certificate path via `--cert`. The desktop app's discovered-device flow now handles certificate trust automatically over LAN discovery.
 
 ### Local network discovery behavior
 
 - `ft-receive` advertises its QUIC listener over mDNS as a FastTransfer receiver.
-- `ft-send discover` browses the local network for those mDNS advertisements and lists the reachable receiver socket addresses.
+- The discovery payload includes the receiver device name, reachable socket addresses, certificate fingerprint, and the DER certificate bytes needed for QUIC/TLS trust.
+- The sender can reconstruct the discovered receiver certificate locally, verify that it matches the advertised fingerprint, and use it without asking the user to browse for a `.der` file in the default desktop flow.
 - The discovery crate keeps LAN browsing and advertising logic isolated from file-transfer orchestration.
 - Discovery is intended for same-LAN scenarios such as shared Wi-Fi or a phone hotspot; it does not replace relay or NAT traversal.
 
@@ -91,21 +92,23 @@ If sender and receiver are on different machines, copy `receiver-cert.der` to th
 cargo run -p transfer-core --bin ft-receive -- --bind 0.0.0.0:5000 --output-dir ./received --device-name "Office Laptop"
 ```
 
-3. Copy `./.fasttransfer/certs/receiver-cert.der` from the receiver to the sender device.
-
-4. On the sending device, list nearby receivers:
+3. On the sending device, list nearby receivers:
 
 ```powershell
 cargo run -p transfer-core --bin ft-send -- discover --timeout-secs 5
 ```
 
-5. Pick one of the discovered addresses and start the transfer:
+4. In the desktop app, refresh nearby devices, pick the discovered receiver, confirm its short fingerprint, choose a file, and send. The app caches the receiver fingerprint locally with trust-on-first-use and reuses the discovered certificate automatically for the QUIC/TLS session.
+
+5. If the same receiver later advertises a different certificate fingerprint, the desktop app reports a fingerprint mismatch and blocks the discovered-device send path until the change is handled deliberately.
+
+6. For the current Rust CLI prototype, nearby discovery helps you find the receiver address, but manual sends still use `--cert`:
 
 ```powershell
 cargo run -p transfer-core --bin ft-send -- send --to 192.168.1.25:5000 --file ./path/to/large-file.iso --cert ./receiver-cert.der --chunk-size 1048576 --parallelism 4
 ```
 
-6. If no receivers appear, make sure both devices are on the same LAN segment, local firewall rules allow mDNS and the QUIC port, and `ft-receive` is still running.
+7. If no receivers appear, make sure both devices are on the same LAN segment, local firewall rules allow mDNS and the QUIC port, and `ft-receive` is still running.
 
 ### Verification behavior
 
@@ -158,9 +161,10 @@ flutter create .
 
 The desktop shell now includes a minimal Tauri interface on top of the existing Rust transfer engine. It provides:
 
-- a native file picker for the source file and receiver certificate
+- a native file picker for the source file
 - a nearby receivers list powered by the `discovery` crate
-- manual target entry as a fallback
+- automatic LAN trust for discovered receivers with visible device identity checks
+- manual target entry as an advanced fallback
 - a send action that uses `transfer-core`
 - live sender progress and a receiver status view
 
@@ -172,7 +176,16 @@ npm install
 npm run tauri dev
 ```
 
-During local development, the desktop app stores receiver certificates and received files under `apps/desktop/.fasttransfer-desktop/`.
+During local development, the desktop app stores receiver certificates, trust-on-first-use records, and received files under `apps/desktop/.fasttransfer-desktop/`.
+
+Default desktop LAN flow:
+
+1. Start the receiver on PC1 from the desktop app.
+2. On PC2, refresh nearby devices.
+3. Select PC1 from the nearby device list and confirm its device name, short fingerprint, and trust state.
+4. Pick a file and press Send.
+5. The sender automatically binds the discovered receiver certificate to that session and connects over QUIC/TLS without a manual certificate picker.
+6. If the receiver certificate changes later, the app marks the device as a fingerprint mismatch and blocks the discovered-device send path until you handle it deliberately.
 
 ### Control plane
 
@@ -198,12 +211,11 @@ go run .
 - Progress is reported as chunks complete, not as individual stream writes occur.
 - The receiver writes chunk payloads into the correct file offsets to preserve final file order.
 - The receiver refuses to overwrite an existing output file unless it is resuming a matching checkpointed transfer.
-- The certificate flow is development-oriented for local testing and should be replaced with real identity and trust management for production deployments.
+- The current LAN auto-trust flow is a development-oriented trust-on-first-use model and should be replaced with stronger authenticated identity for production deployments.
 
 ## Next Steps
 
-1. Replace the development certificate flow with authenticated device identity.
+1. Replace the development trust-on-first-use LAN flow with authenticated device identity and certificate lifecycle management.
 2. Add retry windows and selective retransmission for chunks that were in flight during disconnects.
 3. Introduce relay negotiation for NAT traversal beyond the local network.
 4. Scaffold the Flutter and Tauri applications against the Rust core via FFI.
-

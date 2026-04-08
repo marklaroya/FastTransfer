@@ -8,6 +8,8 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+integrity.workspace = true
 mdns-sd.workspace = true
 
 [lints]

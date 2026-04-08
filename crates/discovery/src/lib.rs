@@ -3,11 +3,15 @@
 use std::{
     collections::BTreeMap,
     env,
+    fs,
     net::SocketAddr,
+    path::Path,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use integrity::{format_sha256, sha256_bytes};
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 /// mDNS service type advertised by FastTransfer receivers.
@@ -16,8 +20,13 @@ const TXT_KEY_DEVICE_NAME: &str = "device_name";
 const TXT_KEY_PEER_ID: &str = "peer_id";
 const TXT_KEY_TRANSPORT: &str = "transport";
 const TXT_KEY_VERSION: &str = "version";
-const DISCOVERY_VERSION: &str = "1";
+const TXT_KEY_CERT_SHA256: &str = "cert_sha256";
+const TXT_KEY_CERT_PARTS: &str = "cert_parts";
+const TXT_KEY_CERT_PART_PREFIX: &str = "cert";
+const DISCOVERY_VERSION: &str = "2";
 const DEFAULT_DEVICE_NAME: &str = "FastTransfer Device";
+const CERT_PART_VALUE_LEN: usize = 200;
+const SHORT_FINGERPRINT_LEN: usize = 12;
 
 /// Peer advertisement shared over discovery channels.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +56,10 @@ pub struct NearbyReceiver {
     pub service_name: String,
     /// Advertised hostname.
     pub host_name: String,
+    /// DER-encoded receiver certificate advertised over LAN discovery.
+    pub certificate_der: Vec<u8>,
+    /// SHA-256 fingerprint for the advertised receiver certificate.
+    pub certificate_sha256_hex: String,
 }
 
 impl NearbyReceiver {
@@ -63,6 +76,11 @@ impl NearbyReceiver {
             addresses: self.addresses.iter().map(SocketAddr::to_string).collect(),
             transport: self.transport.clone(),
         }
+    }
+
+    /// Returns a short human-readable fingerprint for UI display.
+    pub fn short_fingerprint(&self) -> String {
+        short_fingerprint(&self.certificate_sha256_hex)
     }
 }
 
@@ -102,19 +120,39 @@ pub fn default_device_name() -> String {
         .unwrap_or_else(|| DEFAULT_DEVICE_NAME.to_owned())
 }
 
+/// Returns a short display fingerprint from a full certificate fingerprint.
+pub fn short_fingerprint(fingerprint: &str) -> String {
+    fingerprint.chars().take(SHORT_FINGERPRINT_LEN).collect()
+}
+
 /// Starts advertising a receiver on the local network over mDNS.
-pub fn advertise_receiver(bind_addr: SocketAddr, device_name: impl Into<String>) -> Result<ReceiverAdvertiser> {
+pub fn advertise_receiver(
+    bind_addr: SocketAddr,
+    device_name: impl Into<String>,
+    cert_path: &Path,
+) -> Result<ReceiverAdvertiser> {
     let daemon = ServiceDaemon::new().context("failed to start the mDNS responder")?;
     let device_name = normalize_device_name(device_name.into());
     let peer_id = default_peer_id(&device_name, bind_addr.port());
     let instance_name = format!("{device_name}-{}", bind_addr.port());
     let host_name = format!("{}.local.", dns_safe_label(&default_host_label()));
-    let properties = [
-        (TXT_KEY_DEVICE_NAME, device_name.as_str()),
-        (TXT_KEY_PEER_ID, peer_id.as_str()),
-        (TXT_KEY_TRANSPORT, "quic"),
-        (TXT_KEY_VERSION, DISCOVERY_VERSION),
+    let cert_bytes = fs::read(cert_path)
+        .with_context(|| format!("failed to read receiver certificate at {}", cert_path.display()))?;
+    let cert_sha256_hex = format_sha256(&sha256_bytes(&cert_bytes));
+    let cert_b64 = BASE64_STANDARD.encode(cert_bytes);
+    let cert_parts = split_string(&cert_b64, CERT_PART_VALUE_LEN);
+    let mut properties = vec![
+        (TXT_KEY_DEVICE_NAME.to_owned(), device_name.clone()),
+        (TXT_KEY_PEER_ID.to_owned(), peer_id),
+        (TXT_KEY_TRANSPORT.to_owned(), "quic".to_owned()),
+        (TXT_KEY_VERSION.to_owned(), DISCOVERY_VERSION.to_owned()),
+        (TXT_KEY_CERT_SHA256.to_owned(), cert_sha256_hex),
+        (TXT_KEY_CERT_PARTS.to_owned(), cert_parts.len().to_string()),
     ];
+
+    for (index, part) in cert_parts.into_iter().enumerate() {
+        properties.push((format!("{TXT_KEY_CERT_PART_PREFIX}{index}"), part));
+    }
 
     let service = ServiceInfo::new(
         FASTTRANSFER_SERVICE_TYPE,
@@ -122,7 +160,7 @@ pub fn advertise_receiver(bind_addr: SocketAddr, device_name: impl Into<String>)
         &host_name,
         "",
         bind_addr.port(),
-        &properties[..],
+        properties.as_slice(),
     )
     .context("failed to build the FastTransfer mDNS service info")?
     .enable_addr_auto();
@@ -149,7 +187,9 @@ pub fn discover_receivers(timeout: Duration) -> Result<Vec<NearbyReceiver>> {
         let wait_for = remaining.min(Duration::from_millis(250));
         match receiver.recv_timeout(wait_for) {
             Ok(ServiceEvent::ServiceResolved(service)) => {
-                upsert_receiver(&mut receivers, &service);
+                if let Ok(candidate) = nearby_receiver_from(&service) {
+                    upsert_receiver(&mut receivers, candidate);
+                }
             }
             Ok(_) => {}
             Err(_) => {}
@@ -169,29 +209,44 @@ pub fn discover_receivers(timeout: Duration) -> Result<Vec<NearbyReceiver>> {
     Ok(discovered)
 }
 
-fn upsert_receiver(receivers: &mut BTreeMap<String, NearbyReceiver>, service: &ResolvedService) {
-    let key = service.get_fullname().to_owned();
-    let candidate = nearby_receiver_from(service);
-
+fn upsert_receiver(receivers: &mut BTreeMap<String, NearbyReceiver>, candidate: NearbyReceiver) {
+    let key = candidate.service_name.clone();
     receivers
         .entry(key)
         .and_modify(|existing| merge_receiver(existing, &candidate))
         .or_insert(candidate);
 }
 
-fn nearby_receiver_from(service: &ResolvedService) -> NearbyReceiver {
+fn nearby_receiver_from(service: &ResolvedService) -> Result<NearbyReceiver> {
     let mut addresses = resolved_addresses(service);
     addresses.sort_unstable();
     addresses.dedup();
 
-    NearbyReceiver {
+    let certificate_der = decode_certificate(service)?;
+    let advertised_fingerprint = property_or_else(service, TXT_KEY_CERT_SHA256, String::new);
+    if advertised_fingerprint.is_empty() {
+        bail!("discovered receiver {} did not advertise a certificate fingerprint", service.get_fullname());
+    }
+    let actual_fingerprint = format_sha256(&sha256_bytes(&certificate_der));
+    if actual_fingerprint != advertised_fingerprint {
+        bail!(
+            "discovered receiver {} advertised fingerprint {} but certificate decoded to {}",
+            service.get_fullname(),
+            advertised_fingerprint,
+            actual_fingerprint
+        );
+    }
+
+    Ok(NearbyReceiver {
         peer_id: property_or_else(service, TXT_KEY_PEER_ID, || service.get_fullname().to_owned()),
         device_name: property_or_else(service, TXT_KEY_DEVICE_NAME, default_device_name),
         addresses,
         transport: property_or_else(service, TXT_KEY_TRANSPORT, || "quic".to_owned()),
         service_name: service.get_fullname().to_owned(),
         host_name: service.get_hostname().to_owned(),
-    }
+        certificate_der,
+        certificate_sha256_hex: advertised_fingerprint,
+    })
 }
 
 fn merge_receiver(existing: &mut NearbyReceiver, incoming: &NearbyReceiver) {
@@ -206,6 +261,34 @@ fn merge_receiver(existing: &mut NearbyReceiver, incoming: &NearbyReceiver) {
     if existing.transport.is_empty() {
         existing.transport = incoming.transport.clone();
     }
+
+    if existing.certificate_der.is_empty() && !incoming.certificate_der.is_empty() {
+        existing.certificate_der = incoming.certificate_der.clone();
+        existing.certificate_sha256_hex = incoming.certificate_sha256_hex.clone();
+    }
+}
+
+fn decode_certificate(service: &ResolvedService) -> Result<Vec<u8>> {
+    let part_count = property_or_else(service, TXT_KEY_CERT_PARTS, String::new)
+        .parse::<usize>()
+        .context("failed to parse mDNS certificate part count")?;
+    if part_count == 0 {
+        bail!("discovered receiver {} advertised zero certificate parts", service.get_fullname());
+    }
+
+    let mut encoded = String::new();
+    for index in 0..part_count {
+        let key = format!("{TXT_KEY_CERT_PART_PREFIX}{index}");
+        let part = property_or_else(service, &key, String::new);
+        if part.is_empty() {
+            bail!("discovered receiver {} is missing certificate part {index}", service.get_fullname());
+        }
+        encoded.push_str(&part);
+    }
+
+    BASE64_STANDARD
+        .decode(encoded)
+        .context("failed to decode advertised receiver certificate")
 }
 
 fn resolved_addresses(service: &ResolvedService) -> Vec<SocketAddr> {
@@ -223,6 +306,17 @@ fn property_or_else(service: &ResolvedService, key: &str, fallback: impl FnOnce(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(fallback)
+}
+
+fn split_string(value: &str, chunk_len: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < value.len() {
+        let end = (start + chunk_len).min(value.len());
+        parts.push(value[start..end].to_owned());
+        start = end;
+    }
+    parts
 }
 
 fn normalize_device_name(name: String) -> String {

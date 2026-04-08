@@ -1,23 +1,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
 
 use anyhow::{Context, Result};
-use discovery::{default_device_name, discover_receivers, NearbyReceiver};
+use discovery::{advertise_receiver, default_device_name, discover_receivers, NearbyReceiver};
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use transfer_core::{
-    bind_receiver, send_file_with_progress, ReceiveRequest, SendRequest, TransferProgress,
-    TransferSummary, DEFAULT_CHUNK_SIZE, DEFAULT_PARALLELISM,
+    assess_discovered_receiver, bind_receiver, prepare_discovered_send_request,
+    send_file_with_progress, DiscoveredSendRequest, ReceiveRequest, ReceiverTrustReport,
+    ReceiverTrustState, SendRequest, TransferProgress, TransferSummary, DEFAULT_CHUNK_SIZE,
+    DEFAULT_PARALLELISM,
 };
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
@@ -27,6 +30,7 @@ const DEFAULT_SERVER_NAME: &str = "fasttransfer.local";
 struct DesktopState {
     sender_running: Arc<AtomicBool>,
     receiver_running: Arc<AtomicBool>,
+    discovered_receivers: Mutex<HashMap<String, NearbyReceiver>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,18 +41,9 @@ struct ReceiverListItem {
     addresses: Vec<String>,
     transport: String,
     service_name: String,
-}
-
-impl From<NearbyReceiver> for ReceiverListItem {
-    fn from(value: NearbyReceiver) -> Self {
-        Self {
-            device_name: value.device_name,
-            peer_id: value.peer_id,
-            addresses: value.addresses.into_iter().map(|addr| addr.to_string()).collect(),
-            transport: value.transport,
-            service_name: value.service_name,
-        }
-    }
+    short_fingerprint: String,
+    trust_state: String,
+    trust_message: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -136,22 +131,31 @@ struct ReceiverStartPayload {
 #[serde(rename_all = "camelCase")]
 struct SendDesktopRequest {
     source_path: String,
-    target_addr: String,
-    certificate_path: String,
+    selected_peer_id: Option<String>,
+    target_addr: Option<String>,
+    certificate_path: Option<String>,
     server_name: Option<String>,
     chunk_size: Option<u32>,
     parallelism: Option<usize>,
 }
 
 impl SendDesktopRequest {
-    fn into_transfer_request(self) -> Result<SendRequest> {
+    fn into_manual_transfer_request(self) -> Result<SendRequest> {
+        let target_addr = self
+            .target_addr
+            .filter(|value| !value.trim().is_empty())
+            .context("manual target mode requires a receiver address")?;
+        let certificate_path = self
+            .certificate_path
+            .filter(|value| !value.trim().is_empty())
+            .context("manual target mode requires a receiver certificate")?;
+
         Ok(SendRequest {
-            server_addr: self
-                .target_addr
+            server_addr: target_addr
                 .parse::<SocketAddr>()
-                .with_context(|| format!("invalid target address: {}", self.target_addr))?,
+                .with_context(|| format!("invalid target address: {target_addr}"))?,
             source_path: PathBuf::from(self.source_path),
-            certificate_path: PathBuf::from(self.certificate_path),
+            certificate_path: PathBuf::from(certificate_path),
             server_name: self.server_name.unwrap_or_else(|| DEFAULT_SERVER_NAME.to_owned()),
             chunk_size: self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
             parallelism: self.parallelism.unwrap_or(DEFAULT_PARALLELISM).max(1),
@@ -177,11 +181,37 @@ fn pick_certificate_file() -> Option<String> {
 }
 
 #[tauri::command]
-async fn discover_nearby_receivers(timeout_secs: Option<u64>) -> Result<Vec<ReceiverListItem>, String> {
+async fn discover_nearby_receivers(
+    state: State<'_, DesktopState>,
+    timeout_secs: Option<u64>,
+) -> Result<Vec<ReceiverListItem>, String> {
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(3).max(1));
-    discover_receivers(timeout)
-        .map(|receivers| receivers.into_iter().map(ReceiverListItem::from).collect())
-        .map_err(format_error)
+    let trust_dir = trust_cache_dir().map_err(format_error)?;
+    let receivers = discover_receivers(timeout).map_err(format_error)?;
+
+    let mut cache = state
+        .discovered_receivers
+        .lock()
+        .map_err(|_| "failed to access the discovered receiver cache".to_owned())?;
+    cache.clear();
+
+    let mut items = Vec::with_capacity(receivers.len());
+    for receiver in receivers {
+        let trust = assess_discovered_receiver(&receiver, &trust_dir).map_err(format_error)?;
+        cache.insert(receiver.peer_id.clone(), receiver.clone());
+        items.push(ReceiverListItem {
+            device_name: receiver.device_name,
+            peer_id: receiver.peer_id,
+            addresses: receiver.addresses.into_iter().map(|addr| addr.to_string()).collect(),
+            transport: receiver.transport,
+            service_name: receiver.service_name,
+            short_fingerprint: trust.short_fingerprint,
+            trust_state: trust.state.as_str().to_owned(),
+            trust_message: trust.message,
+        });
+    }
+
+    Ok(items)
 }
 
 #[tauri::command]
@@ -235,18 +265,23 @@ async fn start_receiver(
                     summary: None,
                     saved_path: None,
                     remote_address: None,
-                    certificate_path: Some(request_for_task.cert_path.display().to_string()),
+                    certificate_path: Some(certificate_path_for_task.clone()),
                 },
             );
 
             let receiver = bind_receiver(request_for_task.clone())?;
             let ready = receiver.ready();
+            let _advertiser = advertise_receiver(
+                ready.bind_addr,
+                advertised_name_for_task.clone(),
+                ready.cert_path.as_path(),
+            )?;
             emit_receiver_status(
                 &app_handle,
                 ReceiverStatusPayload {
                     state: "listening".to_owned(),
                     message: format!(
-                        "Listening on {} and advertising as {}.",
+                        "Listening on {} and advertising as {} with automatic LAN trust.",
                         ready.bind_addr, advertised_name_for_task
                     ),
                     bind_addr: Some(ready.bind_addr.to_string()),
@@ -324,7 +359,7 @@ async fn start_receiver(
     Ok(ReceiverStartPayload {
         bind_addr: bind_addr.to_string(),
         output_dir: output_dir.display().to_string(),
-        certificate_path: certificate_path,
+        certificate_path,
     })
 }
 
@@ -339,62 +374,171 @@ async fn start_send(
         return Err("A send operation is already in progress.".to_owned());
     }
 
-    let send_request = request.into_transfer_request().map_err(format_error)?;
     let app_handle = app.clone();
     let running_for_task = Arc::clone(&running);
-    let source_path = send_request.source_path.display().to_string();
-    let target_addr = send_request.server_addr.to_string();
+    let source_path = request.source_path.clone();
+    let selected_peer_id = request.selected_peer_id.clone().filter(|value| !value.trim().is_empty());
+
+    let prepared = if let Some(peer_id) = selected_peer_id {
+        let receiver = state
+            .discovered_receivers
+            .lock()
+            .map_err(|_| "failed to access the discovered receiver cache".to_owned())?
+            .get(&peer_id)
+            .cloned()
+            .with_context(|| format!("receiver {peer_id} is no longer in the discovery cache; refresh nearby devices"))
+            .map_err(format_error)?;
+        let trust_dir = trust_cache_dir().map_err(format_error)?;
+        let (send_request, trust_report) = prepare_discovered_send_request(DiscoveredSendRequest {
+            receiver,
+            source_path: PathBuf::from(&request.source_path),
+            trust_cache_dir: trust_dir,
+            server_addr: None,
+            server_name: request.server_name.clone().unwrap_or_else(|| DEFAULT_SERVER_NAME.to_owned()),
+            chunk_size: request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
+            parallelism: request.parallelism.unwrap_or(DEFAULT_PARALLELISM).max(1),
+        })
+        .map_err(format_error)?;
+        PreparedSend::Discovered { send_request, trust_report }
+    } else {
+        PreparedSend::Manual {
+            send_request: request.into_manual_transfer_request().map_err(format_error)?,
+        }
+    };
 
     tauri::async_runtime::spawn(async move {
-        emit_send_status(
-            &app_handle,
-            SendStatusPayload {
-                state: "starting".to_owned(),
-                message: format!("Connecting to {target_addr}..."),
-                progress: None,
-                summary: None,
-            },
-        );
-
-        let app_for_progress = app_handle.clone();
-        let result = send_file_with_progress(send_request, move |progress| {
-            emit_send_status(
-                &app_for_progress,
-                SendStatusPayload {
-                    state: "sending".to_owned(),
-                    message: progress.label.clone(),
-                    progress: Some(progress.into()),
-                    summary: None,
-                },
-            );
-        })
-        .await;
-
-        match result {
-            Ok(summary) => emit_send_status(
-                &app_handle,
-                SendStatusPayload {
-                    state: "completed".to_owned(),
-                    message: format!("Transfer to {target_addr} completed successfully."),
-                    progress: None,
-                    summary: Some(summary.into()),
-                },
-            ),
-            Err(error) => emit_send_status(
-                &app_handle,
-                SendStatusPayload {
-                    state: "error".to_owned(),
-                    message: format!("Failed to send {source_path}: {error:#}"),
-                    progress: None,
-                    summary: None,
-                },
-            ),
+        match prepared {
+            PreparedSend::Discovered { send_request, trust_report } => {
+                run_send_task(
+                    &app_handle,
+                    send_request,
+                    &source_path,
+                    Arc::clone(&running_for_task),
+                    Some(trust_report),
+                )
+                .await;
+            }
+            PreparedSend::Manual { send_request } => {
+                run_send_task(
+                    &app_handle,
+                    send_request,
+                    &source_path,
+                    Arc::clone(&running_for_task),
+                    None,
+                )
+                .await;
+            }
         }
-
-        running_for_task.store(false, Ordering::SeqCst);
     });
 
     Ok(())
+}
+
+enum PreparedSend {
+    Discovered {
+        send_request: SendRequest,
+        trust_report: ReceiverTrustReport,
+    },
+    Manual {
+        send_request: SendRequest,
+    },
+}
+
+async fn run_send_task(
+    app_handle: &AppHandle,
+    send_request: SendRequest,
+    source_path: &str,
+    running: Arc<AtomicBool>,
+    trust_report: Option<ReceiverTrustReport>,
+) {
+    let target_addr = send_request.server_addr.to_string();
+    emit_send_status(
+        app_handle,
+        SendStatusPayload {
+            state: "starting".to_owned(),
+            message: send_start_message(&target_addr, trust_report.as_ref()),
+            progress: None,
+            summary: None,
+        },
+    );
+
+    let app_for_progress = app_handle.clone();
+    let progress_report = trust_report.clone();
+    let result = send_file_with_progress(send_request, move |progress| {
+        emit_send_status(
+            &app_for_progress,
+            SendStatusPayload {
+                state: "sending".to_owned(),
+                message: send_progress_message(progress_report.as_ref()),
+                progress: Some(progress.into()),
+                summary: None,
+            },
+        );
+    })
+    .await;
+
+    match result {
+        Ok(summary) => emit_send_status(
+            app_handle,
+            SendStatusPayload {
+                state: "completed".to_owned(),
+                message: send_success_message(&target_addr, trust_report.as_ref()),
+                progress: None,
+                summary: Some(summary.into()),
+            },
+        ),
+        Err(error) => emit_send_status(
+            app_handle,
+            SendStatusPayload {
+                state: "error".to_owned(),
+                message: format!("Failed to send {source_path}: {error:#}"),
+                progress: None,
+                summary: None,
+            },
+        ),
+    }
+
+    running.store(false, Ordering::SeqCst);
+}
+
+fn send_start_message(target_addr: &str, trust_report: Option<&ReceiverTrustReport>) -> String {
+    match trust_report {
+        Some(report) => format!(
+            "Connecting to {} ({}) at {}. {}",
+            report.device_name, report.short_fingerprint, target_addr, report.message
+        ),
+        None => format!("Connecting to {target_addr} using the manual certificate path..."),
+    }
+}
+
+fn send_progress_message(trust_report: Option<&ReceiverTrustReport>) -> String {
+    match trust_report {
+        Some(report) => format!(
+            "Sending to {} ({}) with {}.",
+            report.device_name,
+            report.short_fingerprint,
+            trust_state_label(report.state)
+        ),
+        None => "Sending via manual target mode.".to_owned(),
+    }
+}
+
+fn send_success_message(target_addr: &str, trust_report: Option<&ReceiverTrustReport>) -> String {
+    match trust_report {
+        Some(report) => format!(
+            "Transfer to {} ({}) at {} completed successfully.",
+            report.device_name, report.short_fingerprint, target_addr
+        ),
+        None => format!("Transfer to {target_addr} completed successfully."),
+    }
+}
+
+fn trust_state_label(state: ReceiverTrustState) -> &'static str {
+    match state {
+        ReceiverTrustState::TrustedForSession => "trust-on-first-use for this session",
+        ReceiverTrustState::KnownDevice => "a cached trusted identity",
+        ReceiverTrustState::FingerprintMismatch => "a fingerprint mismatch",
+    }
 }
 
 fn emit_send_status(app: &AppHandle, payload: SendStatusPayload) {
@@ -408,6 +552,10 @@ fn emit_receiver_status(app: &AppHandle, payload: ReceiverStatusPayload) {
 fn desktop_runtime_dir() -> Result<PathBuf> {
     let current_dir = std::env::current_dir().context("failed to resolve the current working directory")?;
     Ok(current_dir.join(".fasttransfer-desktop"))
+}
+
+fn trust_cache_dir() -> Result<PathBuf> {
+    Ok(desktop_runtime_dir()?.join("trust"))
 }
 
 fn format_error(error: impl std::fmt::Display) -> String {
@@ -427,5 +575,4 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
-
 

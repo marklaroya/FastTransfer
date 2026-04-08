@@ -36,14 +36,6 @@
             </div>
           </label>
 
-          <label class="field">
-            <span>Receiver certificate</span>
-            <div class="inline-input">
-              <input id="certificate-path" type="text" placeholder="Pick receiver-cert.der" readonly />
-              <button id="pick-certificate" type="button">Browse</button>
-            </div>
-          </label>
-
           <div class="field">
             <span>Nearby receivers</span>
             <div id="nearby-devices" class="device-list empty-state">
@@ -51,12 +43,54 @@
             </div>
           </div>
 
-          <label class="field">
-            <span>Manual target</span>
-            <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
-          </label>
+          <div class="status-card identity-card">
+            <div class="status-row">
+              <span class="status-label">Selected receiver</span>
+              <span id="selected-device-badge" class="badge idle">None</span>
+            </div>
+            <p id="selected-device-message" class="status-copy">Refresh nearby devices and choose a receiver for automatic LAN trust.</p>
+            <dl class="summary-grid identity-grid">
+              <div>
+                <dt>Device</dt>
+                <dd id="selected-device-name">No receiver selected</dd>
+              </div>
+              <div>
+                <dt>Address</dt>
+                <dd id="selected-device-address">Pending</dd>
+              </div>
+              <div>
+                <dt>Fingerprint</dt>
+                <dd id="selected-device-fingerprint">Pending</dd>
+              </div>
+              <div>
+                <dt>Trust</dt>
+                <dd id="selected-device-trust">Pending</dd>
+              </div>
+            </dl>
+          </div>
 
-          <div class="settings-grid">
+          <details class="manual-panel">
+            <summary>Advanced manual target fallback</summary>
+            <label class="manual-toggle">
+              <input id="manual-mode" type="checkbox" />
+              <span>Use manual target mode instead of the selected nearby receiver</span>
+            </label>
+
+            <label class="field">
+              <span>Manual target</span>
+              <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
+            </label>
+
+            <label class="field">
+              <span>Receiver certificate</span>
+              <div class="inline-input">
+                <input id="certificate-path" type="text" placeholder="Pick receiver-cert.der" readonly />
+                <button id="pick-certificate" type="button">Browse</button>
+              </div>
+            </label>
+          </details>
+
+          <div class="settings-grid settings-grid-wide">
             <label class="field compact">
               <span>Server name</span>
               <input id="server-name" type="text" value="fasttransfer.local" />
@@ -80,7 +114,7 @@
               <span class="status-label">Send status</span>
               <span id="send-badge" class="badge idle">Idle</span>
             </div>
-            <p id="send-message" class="status-copy">Choose a file, select a certificate, and target a receiver.</p>
+            <p id="send-message" class="status-copy">Refresh nearby devices, pick a receiver, choose a file, and send.</p>
             <div class="progress-block">
               <div class="progress-track"><div id="send-progress-bar" class="progress-fill"></div></div>
               <div class="progress-meta">
