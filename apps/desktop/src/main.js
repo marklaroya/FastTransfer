@@ -12,6 +12,10 @@ const elements = {
   viewSubtitle: $("#view-subtitle"),
   globalRefresh: $("#global-refresh"),
   newTransfer: $("#new-transfer"),
+  commandPaletteTrigger: $("#command-palette-trigger"),
+  toggleInspector: $("#toggle-inspector"),
+  sendInspector: $("#send-inspector"),
+  globalSpeedometer: $("#global-speedometer"),
   networkBadge: $("#network-badge"),
   networkSummary: $("#network-summary"),
   statusLeft: $("#status-left"),
@@ -63,12 +67,18 @@ const elements = {
   usbDriveSelect: $("#usb-drive-select"),
   usbDriveMeta: $("#usb-drive-meta"),
   sendButton: $("#send-button"),
+  sendQueueList: $("#send-queue-list"),
+  queueDropZone: $("#queue-drop-zone"),
 
   sendBadge: $("#send-badge"),
   sendMessage: $("#send-message"),
   sendProgressBar: $("#send-progress-bar"),
   sendProgressText: $("#send-progress-text"),
   sendSpeed: $("#send-speed"),
+  sendAverageSpeed: $("#send-average-speed"),
+  sendEta: $("#send-eta"),
+  sendCurrentFile: $("#send-current-file"),
+  sendTechnique: $("#send-technique"),
   sendSummaryFile: $("#send-summary-file"),
   sendSummaryMeta: $("#send-summary-meta"),
   sendSummaryBytes: $("#send-summary-bytes"),
@@ -134,6 +144,7 @@ const viewMeta = {
 
 const appState = {
   currentView: "send",
+  inspectorCollapsed: false,
   devices: [],
   deviceSearch: "",
   selectedPeerId: null,
@@ -144,6 +155,10 @@ const appState = {
   currentSendMode: "nearby",
   currentSendDestinationLabel: "",
   sourceSummary: null,
+  sendQueue: [],
+  queueCounter: 0,
+  selectedQueueItemId: null,
+  queueAutoRun: false,
   sendBusy: false,
   receiverActive: false,
   receiverState: "idle",
@@ -207,6 +222,187 @@ function formatTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
+function formatEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "--";
+  const secs = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(secs / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  const remSecs = secs % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remSecs}s`;
+  return `${remSecs}s`;
+}
+
+function queueItemById(queueId) {
+  return appState.sendQueue.find((item) => item.id === queueId) ?? null;
+}
+
+function activeQueueItem() {
+  if (!appState.sendQueue.length) return null;
+  const selected = queueItemById(appState.selectedQueueItemId);
+  return selected ?? appState.sendQueue[0];
+}
+
+function syncActiveQueueItem() {
+  const active = activeQueueItem();
+  if (!active) {
+    appState.selectedQueueItemId = null;
+    appState.sourceSummary = null;
+    elements.sourcePath.value = "";
+    return null;
+  }
+
+  appState.selectedQueueItemId = active.id;
+  appState.sourceSummary = active.summary ?? null;
+  elements.sourcePath.value = active.path;
+  return active;
+}
+
+function queueItemStatusLabel(item) {
+  if (item.phase === "scanning") return "Scanning";
+  if (item.phase === "sending") return "Sending";
+  if (item.phase === "starting") return "Starting";
+  if (item.phase === "error") return "Error";
+  return "Ready";
+}
+
+function queueItemStatusKind(item) {
+  if (item.phase === "error") return "error";
+  if (item.phase === "scanning" || item.phase === "sending" || item.phase === "starting") return "active";
+  return "idle";
+}
+
+function queueItemMeta(item) {
+  if (item.error) return item.error;
+  if (!item.summary) return "Inspecting source...";
+  return `${formatBytes(item.summary.totalBytes)} - ${Number(item.summary.totalFiles).toLocaleString()} files`;
+}
+
+function renderSendQueue() {
+  if (!elements.sendQueueList) return;
+
+  if (!appState.sendQueue.length) {
+    elements.sendQueueList.className = "send-queue-list empty-state";
+    elements.sendQueueList.textContent = "No items staged for transfer.";
+    return;
+  }
+
+  const selectedId = activeQueueItem()?.id ?? null;
+  elements.sendQueueList.className = "send-queue-list";
+  elements.sendQueueList.innerHTML = appState.sendQueue
+    .map((item) => {
+      const selected = item.id === selectedId;
+      const rootKind = item.summary ? packageKindLabel(item.summary.rootKind) : "Pending";
+      return `
+        <div class="queue-item${selected ? " selected" : ""}" data-queue-id="${escapeHtml(item.id)}">
+          <button class="queue-item-main" type="button" data-queue-select="${escapeHtml(item.id)}">
+            <span class="queue-item-name">${escapeHtml(item.summary?.rootName ?? item.name)}</span>
+            <span class="queue-item-path">${escapeHtml(item.path)}</span>
+            <span class="queue-item-meta">${escapeHtml(rootKind)} - ${escapeHtml(queueItemMeta(item))}</span>
+          </button>
+          <div class="queue-item-actions">
+            <span class="pill pill-${queueItemStatusKind(item)}">${escapeHtml(queueItemStatusLabel(item))}</span>
+            <button class="queue-remove" type="button" data-queue-remove="${escapeHtml(item.id)}" aria-label="Remove queue item" ${appState.sendBusy && selected ? "disabled" : ""}>Remove</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  for (const button of elements.sendQueueList.querySelectorAll("[data-queue-select]")) {
+    button.addEventListener("click", () => {
+      const queueId = button.dataset.queueSelect;
+      if (!queueId) return;
+      appState.selectedQueueItemId = queueId;
+      syncActiveQueueItem();
+      renderAll();
+    });
+  }
+
+  for (const button of elements.sendQueueList.querySelectorAll("[data-queue-remove]")) {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const queueId = button.dataset.queueRemove;
+      if (!queueId) return;
+      if (appState.sendBusy && queueId === appState.selectedQueueItemId) return;
+      appState.sendQueue = appState.sendQueue.filter((item) => item.id !== queueId);
+      if (appState.selectedQueueItemId === queueId) {
+        appState.selectedQueueItemId = null;
+      }
+      syncActiveQueueItem();
+      renderAll();
+    });
+  }
+}
+
+async function enqueueSourcePath(path) {
+  const trimmed = String(path ?? "").trim();
+  if (!trimmed) return;
+
+  const existing = appState.sendQueue.find((item) => item.path.toLowerCase() === trimmed.toLowerCase());
+  if (existing) {
+    appState.selectedQueueItemId = existing.id;
+    syncActiveQueueItem();
+    renderAll();
+    return;
+  }
+
+  const queueItem = {
+    id: `queue-${++appState.queueCounter}`,
+    path: trimmed,
+    name: basename(trimmed),
+    summary: null,
+    phase: "scanning",
+    error: "",
+  };
+
+  appState.sendQueue.push(queueItem);
+  appState.selectedQueueItemId = queueItem.id;
+  syncActiveQueueItem();
+  renderAll();
+
+  try {
+    const summary = await invoke("inspect_source", { sourcePath: trimmed });
+    const updated = queueItemById(queueItem.id);
+    if (!updated) return;
+    updated.summary = summary;
+    updated.phase = "ready";
+    updated.error = "";
+    if (appState.selectedQueueItemId === updated.id) {
+      appState.sourceSummary = summary;
+      elements.sourcePath.value = updated.path;
+    }
+    renderAll();
+  } catch (error) {
+    const updated = queueItemById(queueItem.id);
+    if (!updated) return;
+    updated.phase = "error";
+    updated.error = String(error);
+    if (appState.selectedQueueItemId === updated.id) {
+      appState.sourceSummary = null;
+    }
+    renderAll();
+    applySendStatus({ state: "error", message: `Failed to inspect source: ${error}` });
+  }
+}
+
+async function enqueueDroppedFiles(fileList) {
+  const files = Array.from(fileList ?? []);
+  if (!files.length) return;
+
+  const droppedPaths = files
+    .map((file) => String(file.path ?? "").trim())
+    .filter((path) => Boolean(path));
+
+  if (!droppedPaths.length) {
+    applySendStatus({ state: "error", message: "Drop could not resolve local file paths. Use Add files or Add folder." });
+    return;
+  }
+
+  for (const path of droppedPaths) {
+    await enqueueSourcePath(path);
+  }
+}
 function inferDeviceType(device) {
   const text = `${device.deviceName ?? ""} ${device.serviceName ?? ""}`.toLowerCase();
   if (/(pixel|iphone|phone|android|mobile)/.test(text)) return "phone";
@@ -537,21 +733,30 @@ function switchView(view) {
     panel.classList.toggle("active", active);
     panel.hidden = !active;
   }
+  updateInspectorControls();
   updateStatusBar();
 }
 
 function renderPackageSummary() {
   const summary = appState.sourceSummary;
+  const activeItem = activeQueueItem();
+
   if (!summary) {
-    elements.packageRootName.textContent = "Pending";
-    elements.packageRootKind.textContent = "Pending";
+    elements.packageRootName.textContent = activeItem?.name ?? "Pending";
+    elements.packageRootKind.textContent = activeItem ? "Inspecting" : "Pending";
     elements.packageTotalFiles.textContent = "0";
     elements.packageTotalFolders.textContent = "0";
     elements.packageTotalBytes.textContent = "0 B";
-    elements.packageKindBadge.textContent = "Nothing selected";
-    elements.packageSummaryMessage.textContent = "Choose a file or folder to preview the package structure before sending.";
-    elements.sendSummaryFile.textContent = "Waiting";
-    elements.sendSummaryMeta.textContent = "Not started";
+    elements.packageKindBadge.textContent = activeItem ? "Inspecting" : "Nothing selected";
+    elements.packageSummaryMessage.textContent = activeItem
+      ? "Analyzing selected queue item..."
+      : "Add files or a folder to stage transfer items.";
+    if (!appState.sendBusy) {
+      elements.sendSummaryFile.textContent = activeItem?.name ?? "Waiting";
+      elements.sendSummaryMeta.textContent = activeItem ? "Queued" : "Not started";
+      elements.sendSummaryHash.textContent = activeItem?.path ?? "Pending";
+      elements.sendCurrentFile.textContent = activeItem?.name ?? "Pending";
+    }
     return;
   }
 
@@ -565,24 +770,12 @@ function renderPackageSummary() {
   if (!appState.sendBusy) {
     elements.sendSummaryFile.textContent = summary.rootName;
     elements.sendSummaryMeta.textContent = `${formatBytes(summary.totalBytes)} - ${packageKindLabel(summary.rootKind)}`;
+    elements.sendCurrentFile.textContent = summary.rootName;
   }
 }
 
 async function setSourcePath(path) {
-  elements.sourcePath.value = path;
-  appState.sourceSummary = null;
-  renderPackageSummary();
-  renderTransferTuning();
-
-  try {
-    const summary = await invoke("inspect_source", { sourcePath: path });
-    appState.sourceSummary = summary;
-    renderAll();
-  } catch (error) {
-    appState.sourceSummary = null;
-    renderAll();
-    applySendStatus({ state: "error", message: `Failed to inspect source: ${error}` });
-  }
+  await enqueueSourcePath(path);
 }
 function renderSelectedTarget() {
   if (appState.destinationMode === "manual") {
@@ -895,6 +1088,10 @@ function syncOverflowTitles() {
     "#send-summary-file",
     "#send-summary-meta",
     "#send-summary-hash",
+    "#send-average-speed",
+    "#send-eta",
+    "#send-current-file",
+    "#send-technique",
     "#send-message",
     "#receiver-bind",
     "#receiver-message",
@@ -915,6 +1112,9 @@ function syncOverflowTitles() {
     ".device-address",
     ".received-item span",
     ".trusted-item span",
+    ".queue-item-name",
+    ".queue-item-path",
+    ".queue-item-meta",
     "#transfers-table-body td",
   ];
 
@@ -955,6 +1155,49 @@ function renderSettings() {
   syncReceiveFolderDisplays(appState.receiveOutputLabel, appState.receiveOutputDir);
 }
 
+function parseSpeedToMib(text) {
+  const normalized = String(text ?? "").trim().toLowerCase();
+  const match = normalized.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  if (normalized.includes("gib/s")) return value * 1024;
+  if (normalized.includes("kib/s")) return value / 1024;
+  if (normalized.includes("b/s")) return value / (1024 * 1024);
+  return value;
+}
+
+function updateGlobalSpeedometer() {
+  if (!elements.globalSpeedometer) return;
+  const sendMib = parseSpeedToMib(elements.sendSpeed?.textContent ?? "0");
+  const receiveMib = parseSpeedToMib(elements.receiverSpeed?.textContent ?? "0");
+  const aggregate = sendMib + receiveMib;
+  elements.globalSpeedometer.textContent = `${aggregate.toFixed(2)} MiB/s`;
+}
+
+function setInspectorCollapsed(collapsed) {
+  appState.inspectorCollapsed = collapsed;
+  document.body.classList.toggle("inspector-collapsed", collapsed);
+  if (elements.toggleInspector) {
+    elements.toggleInspector.setAttribute("aria-pressed", String(collapsed));
+    elements.toggleInspector.textContent = collapsed ? "Show inspector" : "Inspector";
+  }
+}
+
+function updateInspectorControls() {
+  if (!elements.toggleInspector) return;
+  const enabled = appState.currentView === "send";
+  elements.toggleInspector.hidden = !enabled;
+  elements.toggleInspector.disabled = !enabled;
+  if (!enabled) {
+    setInspectorCollapsed(false);
+  }
+}
+
+function toggleInspector() {
+  if (appState.currentView !== "send") return;
+  setInspectorCollapsed(!appState.inspectorCollapsed);
+}
 function updateStatusBar() {
   const activeProgress = [...appState.transfers].sort((a, b) => b.updatedAt - a.updatedAt)[0];
   elements.statusLeft.textContent = `${appState.devices.length} device${appState.devices.length === 1 ? "" : "s"} on LAN`;
@@ -964,6 +1207,7 @@ function updateStatusBar() {
   elements.statusRight.textContent = activeProgress
     ? `${activeProgress.status} - ${activeProgress.speed}`
     : currentDestinationLabel();
+  updateGlobalSpeedometer();
 }
 
 function renderAll() {
@@ -971,6 +1215,8 @@ function renderAll() {
   if (!elements.localDestinationPath.value && appState.localDestinationPath) {
     elements.localDestinationPath.value = appState.localDestinationPath;
   }
+  syncActiveQueueItem();
+  renderSendQueue();
   renderPackageSummary();
   renderTransferTuning();
   renderSelectedTarget();
@@ -981,6 +1227,7 @@ function renderAll() {
   renderSettings();
   renderNetworkState();
   setReceiverToggle();
+  updateInspectorControls();
   updateStatusBar();
   syncOverflowTitles();
 }
@@ -1065,13 +1312,27 @@ async function toggleReceiver() {
 }
 
 async function startSend() {
-  if (!elements.sourcePath.value) {
-    applySendStatus({ state: "error", message: "Choose a file or folder before sending." });
+  if (appState.sendBusy) {
     return;
   }
 
+  const activeItem = syncActiveQueueItem();
+  if (!activeItem) {
+    applySendStatus({ state: "error", message: "Add a file or folder to the queue before sending." });
+    return;
+  }
+
+  if (!activeItem.summary) {
+    applySendStatus({ state: "error", message: "Selected queue item is still being analyzed. Please wait." });
+    return;
+  }
+
+  const sourcePath = activeItem.path;
   const mode = appState.destinationMode;
   const tuning = activeTransferTuning();
+  appState.queueAutoRun = appState.sendQueue.length > 1;
+  activeItem.phase = "starting";
+  renderSendQueue();
 
   try {
     if (mode === "nearby") {
@@ -1082,7 +1343,7 @@ async function startSend() {
 
       await invoke("start_send", {
         request: {
-          sourcePath: elements.sourcePath.value,
+          sourcePath,
           selectedPeerId: appState.selectedPeerId,
           targetAddr: null,
           certificatePath: null,
@@ -1107,7 +1368,7 @@ async function startSend() {
 
       await invoke("start_send", {
         request: {
-          sourcePath: elements.sourcePath.value,
+          sourcePath,
           selectedPeerId: null,
           targetAddr: elements.targetAddress.value.trim(),
           certificatePath: elements.certificatePath.value,
@@ -1133,7 +1394,7 @@ async function startSend() {
 
       await invoke("start_local_copy_transfer", {
         request: {
-          sourcePath: elements.sourcePath.value,
+          sourcePath,
           destinationPath: drive.mountPath,
           destinationKind: "usb_drive",
           chunkSize: tuning.chunkSize,
@@ -1156,7 +1417,7 @@ async function startSend() {
 
     await invoke("start_local_copy_transfer", {
       request: {
-        sourcePath: elements.sourcePath.value,
+        sourcePath,
         destinationPath: localDestination,
         destinationKind: "local_folder",
         chunkSize: tuning.chunkSize,
@@ -1189,8 +1450,28 @@ function applySendStatus(payload) {
   elements.sendMessage.textContent = appState.sendMessage;
   setPill(elements.sendBadge, stateLabel(state), stateKind(state));
 
+  const activeItem = activeQueueItem();
+  if (activeItem && ["starting", "scanning", "sending"].includes(state)) {
+    activeItem.phase = state;
+    activeItem.error = "";
+  }
+  if (activeItem && state === "error") {
+    activeItem.phase = "error";
+    activeItem.error = appState.sendMessage;
+    appState.queueAutoRun = false;
+  }
+
   if (payload.progress) {
     applyProgress(elements.sendProgressBar, elements.sendProgressText, elements.sendSpeed, payload.progress);
+    const avgMib = Number(payload.progress.averageMibPerSec ?? 0);
+    const remainingBytes = Math.max(0, Number(payload.progress.totalBytes ?? 0) - Number(payload.progress.transferredBytes ?? 0));
+    const etaSeconds = avgMib > 0 ? remainingBytes / (avgMib * 1024 * 1024) : Number.NaN;
+
+    elements.sendAverageSpeed.textContent = `${avgMib.toFixed(2)} MiB/s`;
+    elements.sendEta.textContent = formatEta(etaSeconds);
+    elements.sendCurrentFile.textContent = payload.progress.currentPath || (payload.progress.phase === "scanning" ? "Scanning files..." : "Preparing files");
+    elements.sendTechnique.textContent = payload.progress.phase === "scanning" ? "Streaming scan" : "Streaming";
+
     elements.sendSummaryFile.textContent = appState.sourceSummary?.rootName ?? basename(elements.sourcePath.value) ?? "Outgoing package";
     elements.sendSummaryMeta.textContent = `${formatBytes(payload.progress.totalBytes)} - ${currentDestinationLabel()}`;
     elements.sendSummaryBytes.textContent = `${formatBytes(payload.progress.transferredBytes)} / ${formatBytes(payload.progress.totalBytes)}`;
@@ -1204,6 +1485,10 @@ function applySendStatus(payload) {
     elements.sendSummaryBytes.textContent = formatBytes(payload.summary.bytesTransferred);
     elements.sendSummaryChunks.textContent = `${payload.summary.completedFiles} file${payload.summary.completedFiles === 1 ? "" : "s"}`;
     elements.sendSummaryHash.textContent = payload.summary.integrityVerified ? "Verified" : payload.summary.sha256Hex;
+    elements.sendAverageSpeed.textContent = `${Number(payload.summary.averageMibPerSec ?? 0).toFixed(2)} MiB/s`;
+    elements.sendEta.textContent = "--";
+    elements.sendCurrentFile.textContent = payload.summary.fileName;
+    elements.sendTechnique.textContent = "Streaming";
     if (state === "completed") {
       elements.sendProgressBar.style.width = "100%";
       elements.sendProgressText.textContent = "100.0%";
@@ -1236,6 +1521,28 @@ function applySendStatus(payload) {
     }
   }
 
+  if (state === "completed") {
+    const finishedItem = activeQueueItem();
+    if (finishedItem) {
+      appState.sendQueue = appState.sendQueue.filter((item) => item.id !== finishedItem.id);
+      appState.selectedQueueItemId = null;
+      syncActiveQueueItem();
+    }
+
+    const shouldContinue = appState.queueAutoRun && appState.sendQueue.length > 0;
+    if (shouldContinue) {
+      renderSendQueue();
+      queueMicrotask(() => {
+        if (!appState.sendBusy) {
+          void startSend();
+        }
+      });
+    } else {
+      appState.queueAutoRun = false;
+    }
+  }
+
+  renderSendQueue();
   renderTransfers();
   updateStatusBar();
   syncOverflowTitles();
@@ -1351,6 +1658,15 @@ function wireEvents() {
   elements.refreshDevicesSend.addEventListener("click", refreshDevices);
   elements.refreshDevicesView.addEventListener("click", refreshDevices);
   elements.newTransfer.addEventListener("click", () => switchView("send"));
+  if (elements.toggleInspector) {
+    elements.toggleInspector.addEventListener("click", () => toggleInspector());
+  }
+  if (elements.commandPaletteTrigger) {
+    elements.commandPaletteTrigger.addEventListener("click", () => {
+      switchView("send");
+      elements.deviceSearch?.focus();
+    });
+  }
 
   elements.deviceSearch.addEventListener("input", () => {
     appState.deviceSearch = elements.deviceSearch.value;
@@ -1372,6 +1688,24 @@ function wireEvents() {
       switchView("send");
     }
   });
+
+  if (elements.queueDropZone) {
+    elements.queueDropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      elements.queueDropZone.classList.add("drag-over");
+    });
+
+    elements.queueDropZone.addEventListener("dragleave", () => {
+      elements.queueDropZone.classList.remove("drag-over");
+    });
+
+    elements.queueDropZone.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      elements.queueDropZone.classList.remove("drag-over");
+      await enqueueDroppedFiles(event.dataTransfer?.files);
+      switchView("send");
+    });
+  }
 
   elements.pickCertificate.addEventListener("click", async () => {
     const selected = await invoke("pick_certificate_file");
@@ -1414,6 +1748,29 @@ function wireEvents() {
   elements.browseOutput.addEventListener("click", browseReceiveOutput);
   elements.settingsBrowseOutput.addEventListener("click", browseReceiveOutput);
   elements.settingsLanDiscovery.addEventListener("change", refreshDevices);
+
+  document.addEventListener("keydown", (event) => {
+    const modifier = event.ctrlKey || event.metaKey;
+    if (!modifier) return;
+
+    const key = String(event.key ?? "").toLowerCase();
+    if (key === "k") {
+      event.preventDefault();
+      elements.commandPaletteTrigger?.click();
+      return;
+    }
+
+    if (event.key === ".") {
+      event.preventDefault();
+      toggleInspector();
+      return;
+    }
+
+    if (event.key === "Enter" && appState.currentView === "send" && !appState.sendBusy && appState.sendQueue.length > 0) {
+      event.preventDefault();
+      void startSend();
+    }
+  });
 }
 
 async function bootstrap() {
@@ -1422,6 +1779,7 @@ async function bootstrap() {
   await listen("receiver-status", (event) => applyReceiverStatus(event.payload));
   syncReceiveFolderDisplays(appState.receiveOutputLabel, appState.receiveOutputDir);
   switchView("send");
+  setInspectorCollapsed(false);
   renderAll();
   await refreshDevices();
 }
@@ -1430,4 +1788,19 @@ bootstrap().catch((error) => {
   applySendStatus({ state: "error", message: `App bootstrap failed: ${error}` });
   applyReceiverStatus({ state: "error", message: `App bootstrap failed: ${error}` });
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

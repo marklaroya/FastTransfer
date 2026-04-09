@@ -68,216 +68,236 @@
         </header>
 
         <section class="view-host">
-          <section class="view active" data-screen="send">
-            <div class="send-layout">
-              <section class="panel panel-side">
+                    <section class="view active" data-screen="send">
+            <div class="send-layout send-layout-3">
+              <section class="panel panel-side panel-devices">
                 <div class="panel-header">
                   <div>
-                    <h2>Nearby devices</h2>
-                    <p>Choose a trusted device on your LAN</p>
+                    <h2>Devices</h2>
+                    <p>Nearby receivers on your LAN</p>
                   </div>
                   <button id="refresh-devices-send" class="secondary-button compact-button" type="button">Refresh</button>
                 </div>
 
                 <label class="search-box">
                   <span class="search-icon">&#9906;</span>
-                  <input id="device-search" type="text" placeholder="Search devices" />
+                  <input id="device-search" type="text" placeholder="Search by name, IP, trust" />
                 </label>
 
                 <div id="send-device-list" class="device-list empty-state">No nearby receivers found.</div>
               </section>
 
-              <section class="send-main">
-                <section class="panel">
-                  <div class="panel-header border-bottom">
-                    <div>
-                      <h2>New transfer</h2>
-                    </div>
+              <section class="panel panel-center">
+                <div class="panel-header border-bottom">
+                  <div>
+                    <h2>Transfer setup</h2>
+                    <p>Select destination, stage files, then send.</p>
                   </div>
+                </div>
 
-                  <div class="new-transfer-grid">
-                    <div class="stack-column">
-                      <section class="card destination-card">
-                        <div class="section-label">Destination</div>
-                        <div class="destination-mode-row" role="group" aria-label="Destination type">
-                          <button id="destination-nearby" class="destination-mode-button active" data-destination-mode="nearby" type="button">Nearby device</button>
-                          <button id="destination-manual" class="destination-mode-button" data-destination-mode="manual" type="button">Manual address</button>
-                          <button id="destination-usb" class="destination-mode-button" data-destination-mode="usb" type="button">USB / External drive</button>
-                          <button id="destination-local" class="destination-mode-button" data-destination-mode="local" type="button">Local folder</button>
-                        </div>
-
-                        <div id="destination-nearby-panel" class="destination-panel">
-                          <p class="help-copy">Use a receiver discovered on your LAN from the Nearby devices list.</p>
-                        </div>
-
-                        <div id="destination-manual-panel" class="destination-panel" hidden>
-                          <div class="settings-inline-grid">
-                            <label>
-                              <span>Manual target</span>
-                              <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
-                            </label>
-                            <label>
-                              <span>Receiver certificate</span>
-                              <div class="inline-field">
-                                <input id="certificate-path" type="text" placeholder="receiver-cert.der" readonly />
-                                <button id="pick-certificate" type="button">Browse</button>
-                              </div>
-                            </label>
-                          </div>
-                        </div>
-
-                        <div id="destination-usb-panel" class="destination-panel" hidden>
-                          <div class="inline-field">
-                            <select id="usb-drive-select"></select>
-                            <button id="refresh-usb-drives" type="button">Refresh drives</button>
-                          </div>
-                          <p id="usb-drive-meta" class="help-copy">Select a removable drive to copy the package directly.</p>
-                        </div>
-
-                        <div id="destination-local-panel" class="destination-panel" hidden>
-                          <div class="inline-field">
-                            <input id="local-destination-path" type="text" placeholder="Choose destination folder" readonly />
-                            <button id="pick-local-destination" type="button">Browse</button>
-                          </div>
-                          <p class="help-copy">The package will be copied directly to this folder.</p>
-                        </div>
-                      </section>
-
-                      <section class="card target-card">
-                        <div class="section-label">Selected destination</div>
-                        <div class="target-row">
-                          <div>
-                            <div id="send-target-name" class="card-title">No destination selected</div>
-                            <div id="send-target-address" class="card-subtitle">Pending</div>
-                          </div>
-                          <span id="send-target-badge" class="pill">No target</span>
-                        </div>
-                        <div id="send-target-message" class="card-copy">Choose a destination to start a transfer.</div>
-                        <div class="target-meta">
-                          <div>
-                            <span>Identity / Drive</span>
-                            <strong id="send-target-fingerprint">Pending</strong>
-                          </div>
-                          <div>
-                            <span>Trust / Status</span>
-                            <strong id="send-target-trust">Pending</strong>
-                          </div>
-                        </div>
-                      </section>
-
-                      <section class="card package-card">
-                        <div class="section-label">Package</div>
-                        <div class="package-actions">
-                          <button id="pick-source-file" class="primary-button" type="button">Choose file</button>
-                          <button id="pick-source-folder" class="secondary-button" type="button">Choose folder</button>
-                        </div>
-                        <input id="source-path" class="mono-field" type="text" placeholder="Choose a file or folder" readonly />
-                        <div class="package-grid">
-                          <div>
-                            <span>Root</span>
-                            <strong id="package-root-name">Pending</strong>
-                          </div>
-                          <div>
-                            <span>Type</span>
-                            <strong id="package-root-kind">Pending</strong>
-                          </div>
-                          <div>
-                            <span>Files</span>
-                            <strong id="package-total-files">0</strong>
-                          </div>
-                          <div>
-                            <span>Total size</span>
-                            <strong id="package-total-bytes">0 B</strong>
-                          </div>
-                        </div>
-                        <div class="package-grid package-grid-secondary">
-                          <div>
-                            <span>Folders</span>
-                            <strong id="package-total-folders">0</strong>
-                          </div>
-                          <div>
-                            <span>Status</span>
-                            <strong id="package-kind-badge" class="text-badge">Nothing selected</strong>
-                          </div>
-                        </div>
-                        <p id="package-summary-message" class="help-copy">Choose a file or folder to preview the package structure before sending.</p>
-                      </section>
-
-                      <details class="advanced-panel">
-                        <summary>
-                          <span>Advanced settings</span>
-                          <span class="chevron">&#9662;</span>
-                        </summary>
-                        <div class="advanced-body">
-                          <label class="toggle-row">
-                            <input id="auto-tune" type="checkbox" checked />
-                            <span>Auto tune chunk size and parallelism (recommended)</span>
-                          </label>
-                          <p id="auto-tune-summary" class="help-copy">Auto tuning is active. Selected values appear here after source analysis.</p>
-                          <div class="settings-inline-grid compact-three">
-                            <label>
-                              <span>Server name</span>
-                              <input id="server-name" type="text" value="fasttransfer.local" />
-                            </label>
-                            <label>
-                              <span>Chunk size</span>
-                              <input id="chunk-size" type="number" min="1" step="1" value="4194304" />
-                            </label>
-                            <label>
-                              <span>Parallelism</span>
-                              <input id="parallelism" type="number" min="1" step="1" value="8" />
-                            </label>
-                          </div>
-                        </div>
-                      </details>
+                <div class="transfer-setup-grid">
+                  <section class="card destination-card">
+                    <div class="section-label">Destination</div>
+                    <div class="destination-mode-row" role="group" aria-label="Destination type">
+                      <button id="destination-nearby" class="destination-mode-button active" data-destination-mode="nearby" type="button">Nearby device</button>
+                      <button id="destination-manual" class="destination-mode-button" data-destination-mode="manual" type="button">Manual address</button>
+                      <button id="destination-usb" class="destination-mode-button" data-destination-mode="usb" type="button">USB / External drive</button>
+                      <button id="destination-local" class="destination-mode-button" data-destination-mode="local" type="button">Local folder</button>
                     </div>
 
-                    <div class="stack-column">
-                      <section class="card action-card">
-                        <div class="section-label">Ready to send</div>
-                        <p class="card-copy">Transfer to <strong id="action-target-name">selected device</strong> over secure LAN.</p>
-                        <button id="send-button" class="primary-button wide-button" type="button">Send package</button>
-                      </section>
-
-                      <section class="card progress-card">
-                        <div class="transfer-head">
-                          <div>
-                            <div class="card-title">Current transfer</div>
-                            <div id="send-summary-file" class="card-subtitle">Waiting</div>
-                          </div>
-                          <span id="send-badge" class="pill">Idle</span>
-                        </div>
-                        <div class="transfer-meta-line">
-                          <span id="send-summary-meta">Not started</span>
-                        </div>
-                        <div class="progress-track"><div id="send-progress-bar" class="progress-fill"></div></div>
-                        <div class="progress-stats">
-                          <span id="send-progress-text">0%</span>
-                          <span id="send-speed">0.00 MiB/s</span>
-                        </div>
-                        <div class="transfer-grid">
-                          <div>
-                            <span>Transferred</span>
-                            <strong id="send-summary-bytes">0 B</strong>
-                          </div>
-                          <div>
-                            <span>Files</span>
-                            <strong id="send-summary-chunks">0</strong>
-                          </div>
-                          <div>
-                            <span>Current file</span>
-                            <strong id="send-summary-hash">Pending</strong>
-                          </div>
-                          <div>
-                            <span>Message</span>
-                            <strong id="send-message">Ready.</strong>
-                          </div>
-                        </div>
-                      </section>
+                    <div id="destination-nearby-panel" class="destination-panel">
+                      <p class="help-copy">Choose a receiver from the Devices panel.</p>
                     </div>
-                  </div>
-                </section>
+
+                    <div id="destination-manual-panel" class="destination-panel" hidden>
+                      <div class="settings-inline-grid">
+                        <label>
+                          <span>Manual target</span>
+                          <input id="target-address" type="text" placeholder="192.168.1.25:5000" />
+                        </label>
+                        <label>
+                          <span>Receiver certificate</span>
+                          <div class="inline-field">
+                            <input id="certificate-path" type="text" placeholder="receiver-cert.der" readonly />
+                            <button id="pick-certificate" type="button">Browse</button>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div id="destination-usb-panel" class="destination-panel" hidden>
+                      <div class="inline-field">
+                        <select id="usb-drive-select"></select>
+                        <button id="refresh-usb-drives" type="button">Refresh drives</button>
+                      </div>
+                      <p id="usb-drive-meta" class="help-copy">Select a removable drive to copy the package directly.</p>
+                    </div>
+
+                    <div id="destination-local-panel" class="destination-panel" hidden>
+                      <div class="inline-field">
+                        <input id="local-destination-path" type="text" placeholder="Choose destination folder" readonly />
+                        <button id="pick-local-destination" type="button">Browse</button>
+                      </div>
+                      <p class="help-copy">The package will be copied directly to this folder.</p>
+                    </div>
+                  </section>
+
+                  <section class="card target-card">
+                    <div class="section-label">Selected destination</div>
+                    <div class="target-row">
+                      <div>
+                        <div id="send-target-name" class="card-title">No destination selected</div>
+                        <div id="send-target-address" class="card-subtitle">Pending</div>
+                      </div>
+                      <span id="send-target-badge" class="pill">No target</span>
+                    </div>
+                    <div id="send-target-message" class="card-copy">Choose a destination to start a transfer.</div>
+                    <div class="target-meta">
+                      <div>
+                        <span>Identity / Drive</span>
+                        <strong id="send-target-fingerprint">Pending</strong>
+                      </div>
+                      <div>
+                        <span>Trust / Status</span>
+                        <strong id="send-target-trust">Pending</strong>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="card package-card queue-card">
+                    <div class="section-label">Transfer queue</div>
+                    <div class="package-actions">
+                      <button id="pick-source-file" class="primary-button" type="button">Add files</button>
+                      <button id="pick-source-folder" class="secondary-button" type="button">Add folder</button>
+                    </div>
+                    <div id="queue-drop-zone" class="queue-drop-zone" tabindex="0">Drop files or folders here</div>
+                    <div id="send-queue-list" class="send-queue-list empty-state">No items staged for transfer.</div>
+                    <input id="source-path" class="mono-field" type="text" placeholder="Active queue item path" readonly />
+                    <div class="package-grid">
+                      <div>
+                        <span>Root</span>
+                        <strong id="package-root-name">Pending</strong>
+                      </div>
+                      <div>
+                        <span>Type</span>
+                        <strong id="package-root-kind">Pending</strong>
+                      </div>
+                      <div>
+                        <span>Files</span>
+                        <strong id="package-total-files">0</strong>
+                      </div>
+                      <div>
+                        <span>Total size</span>
+                        <strong id="package-total-bytes">0 B</strong>
+                      </div>
+                    </div>
+                    <div class="package-grid package-grid-secondary">
+                      <div>
+                        <span>Folders</span>
+                        <strong id="package-total-folders">0</strong>
+                      </div>
+                      <div>
+                        <span>Status</span>
+                        <strong id="package-kind-badge" class="text-badge">Nothing selected</strong>
+                      </div>
+                    </div>
+                    <p id="package-summary-message" class="help-copy">Add files or a folder to stage transfer items.</p>
+                  </section>
+
+                  <details class="advanced-panel">
+                    <summary>
+                      <span>Advanced settings</span>
+                      <span class="chevron">&#9662;</span>
+                    </summary>
+                    <div class="advanced-body">
+                      <label class="toggle-row">
+                        <input id="auto-tune" type="checkbox" checked />
+                        <span>Auto tune chunk size and parallelism (recommended)</span>
+                      </label>
+                      <p id="auto-tune-summary" class="help-copy">Auto tuning is active. Selected values appear here after source analysis.</p>
+                      <div class="settings-inline-grid compact-three">
+                        <label>
+                          <span>Server name</span>
+                          <input id="server-name" type="text" value="fasttransfer.local" />
+                        </label>
+                        <label>
+                          <span>Chunk size</span>
+                          <input id="chunk-size" type="number" min="1" step="1" value="4194304" />
+                        </label>
+                        <label>
+                          <span>Parallelism</span>
+                          <input id="parallelism" type="number" min="1" step="1" value="8" />
+                        </label>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
+                <div class="send-action-row">
+                  <p class="card-copy">Ready to send to <strong id="action-target-name">selected destination</strong>.</p>
+                  <button id="send-button" class="primary-button" type="button">Send transfer</button>
+                </div>
               </section>
+
+              <aside class="panel panel-status">
+                <div class="panel-header border-bottom">
+                  <div>
+                    <h2>Transfer status</h2>
+                    <p>Live throughput and current file progress</p>
+                  </div>
+                  <span id="send-badge" class="pill">Idle</span>
+                </div>
+
+                <div class="status-panel-body">
+                  <div class="card status-main-card">
+                    <div class="card-title" id="send-summary-file">Waiting</div>
+                    <div id="send-summary-meta" class="card-subtitle">Not started</div>
+                    <div class="progress-track"><div id="send-progress-bar" class="progress-fill"></div></div>
+                    <div class="progress-stats">
+                      <span id="send-progress-text">0%</span>
+                      <span id="send-speed">0.00 MiB/s</span>
+                    </div>
+                  </div>
+
+                  <div class="status-kpi-grid">
+                    <div>
+                      <span>Average speed</span>
+                      <strong id="send-average-speed">0.00 MiB/s</strong>
+                    </div>
+                    <div>
+                      <span>ETA</span>
+                      <strong id="send-eta">--</strong>
+                    </div>
+                    <div>
+                      <span>Current file</span>
+                      <strong id="send-current-file">Pending</strong>
+                    </div>
+                    <div>
+                      <span>Technique</span>
+                      <strong id="send-technique">Streaming</strong>
+                    </div>
+                  </div>
+
+                  <div class="transfer-grid status-transfer-grid">
+                    <div>
+                      <span>Transferred</span>
+                      <strong id="send-summary-bytes">0 B</strong>
+                    </div>
+                    <div>
+                      <span>Files</span>
+                      <strong id="send-summary-chunks">0</strong>
+                    </div>
+                    <div>
+                      <span>Queue item</span>
+                      <strong id="send-summary-hash">Pending</strong>
+                    </div>
+                    <div>
+                      <span>Status</span>
+                      <strong id="send-message">Ready.</strong>
+                    </div>
+                  </div>
+                </div>
+              </aside>
             </div>
           </section>
 

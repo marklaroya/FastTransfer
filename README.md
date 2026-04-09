@@ -1,6 +1,28 @@
-# FastTransfer Monorepo
+# ⚡ FastTransfer
 
-FastTransfer is a P2P-first cross-platform file transfer system focused on high-throughput, resumable, integrity-checked transfers across Android, iOS, and desktop platforms.
+FastTransfer is a high-performance, local-first file transfer system designed to move large files between devices at maximum speed — without using the cloud.
+
+Built for desktop and mobile, FastTransfer uses a streaming, parallelized transfer pipeline over QUIC to deliver fast, resumable, and integrity-verified transfers across devices on the same network.
+
+## 🚀 Why FastTransfer?
+
+- ⚡ **Streaming transfers** — start sending immediately without waiting for full file scans
+- 🚀 **High throughput** — chunked + parallel transfers over QUIC
+- 🔁 **Resume support** — continue interrupted transfers without restarting
+- 🔒 **Integrity verified** — SHA-256 validation per chunk and per file
+- 🌐 **Local-first** — no cloud, no upload/download delays
+- 📁 **Folder support** — send entire directories with structure preserved
+
+
+## 🧠 How it works
+
+1. Discover nearby devices over LAN (mDNS)
+2. Select a file or folder to send
+3. Stream file data in chunks over QUIC
+4. Receiver reconstructs files in real time
+5. Integrity is verified before completion
+6. Transfers can resume if interrupted
+
 
 ## Architecture
 
