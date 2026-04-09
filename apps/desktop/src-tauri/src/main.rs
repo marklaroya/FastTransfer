@@ -1364,6 +1364,7 @@ fn main() {
             discover_nearby_receivers,
             start_receiver,
             stop_receiver,
+            stop_send,
             start_send,
             start_local_copy_transfer
         ])
