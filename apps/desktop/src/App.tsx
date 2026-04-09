@@ -121,6 +121,26 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(2)} ${units[unitIndex]}`;
 }
 
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "< 1s";
+  }
+
+  const roundedSeconds = Math.max(1, Math.round(seconds));
+  const hours = Math.floor(roundedSeconds / 3600);
+  const minutes = Math.floor((roundedSeconds % 3600) / 60);
+  const remainingSeconds = roundedSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+
+  return `${remainingSeconds}s`;
+}
 function stateChipClasses(state: string): string {
   if (state === "completed" || state === "listening") {
     return "bg-accentSoft text-accent";
@@ -152,6 +172,7 @@ function App() {
   const [receivers, setReceivers] = useState<ReceiverListItem[]>([]);
   const [selectedPeerId, setSelectedPeerId] = useState("");
   const [receiversBusy, setReceiversBusy] = useState(false);
+  const [receiverQuery, setReceiverQuery] = useState("");
 
   const [targetAddr, setTargetAddr] = useState("");
   const [certificatePath, setCertificatePath] = useState("");
@@ -425,11 +446,43 @@ function App() {
 
   const selectedReceiver = receivers.find((item) => item.peerId === selectedPeerId) ?? null;
   const selectedDrive = drives.find((item) => item.id === selectedDriveId) ?? null;
+  const filteredReceivers = useMemo(() => {
+    const query = receiverQuery.trim().toLowerCase();
+    if (!query) {
+      return receivers;
+    }
+
+    return receivers.filter((receiver) => {
+      const haystack = [
+        receiver.deviceName,
+        receiver.peerId,
+        receiver.shortFingerprint,
+        receiver.trustMessage,
+        receiver.addresses.join(" "),
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(query);
+    });
+  }, [receivers, receiverQuery]);
 
   const sendPercent = Math.max(
     0,
     Math.min(100, sendStatus.progress?.percent ?? (sendStatus.state === "completed" ? 100 : 0))
   );
+  const sendRemainingBytes = sendStatus.progress
+    ? Math.max(0, sendStatus.progress.totalBytes - sendStatus.progress.transferredBytes)
+    : 0;
+  const sendEtaSeconds =
+    sendStatus.progress && sendStatus.progress.averageMibPerSec > 0
+      ? sendRemainingBytes / (sendStatus.progress.averageMibPerSec * 1024 * 1024)
+      : undefined;
+  const sendStatusMeta = sendPaused
+    ? `Paused at ${sendPercent.toFixed(2)}%`
+    : sendStatus.state === "sending" && typeof sendEtaSeconds === "number"
+    ? `ETA ${formatDuration(sendEtaSeconds)}`
+    : null;
 
   const receiverPercent = Math.max(
     0,
@@ -894,7 +947,7 @@ function App() {
                     void refreshDrives();
                   }
                 }}
-                disabled={!tauriReady || receiversBusy || drivesBusy}
+                disabled={!tauriReady || receiversBusy || drivesBusy || sendBusy}
               >
                 Refresh
               </button>
@@ -927,17 +980,32 @@ function App() {
                     onClick={() => {
                       void refreshReceivers();
                     }}
-                    disabled={!tauriReady || receiversBusy}
+                    disabled={!tauriReady || receiversBusy || sendBusy}
                   >
                     {receiversBusy ? "Scanning..." : "Scan LAN"}
                   </button>
                 </div>
 
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <input
+                    className="min-w-[220px] flex-1 rounded-xl border border-border px-3 py-2 text-sm"
+                    placeholder="Filter by name, IP, or fingerprint"
+                    value={receiverQuery}
+                    onChange={(event) => setReceiverQuery(event.target.value)}
+                    disabled={sendBusy}
+                  />
+                  <span className="text-xs text-muted">
+                    {filteredReceivers.length}/{receivers.length}
+                  </span>
+                </div>
+
                 {receivers.length === 0 ? (
                   <p className="text-sm text-muted">No devices found yet.</p>
+                ) : filteredReceivers.length === 0 ? (
+                  <p className="text-sm text-muted">No receivers match your filter.</p>
                 ) : (
-                  <div className="space-y-2">
-                    {receivers.map((receiver) => (
+                  <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                    {filteredReceivers.map((receiver) => (
                       <button
                         key={receiver.peerId}
                         className={[
@@ -947,6 +1015,7 @@ function App() {
                             : "border-border bg-white",
                         ].join(" ")}
                         onClick={() => setSelectedPeerId(receiver.peerId)}
+                        disabled={sendBusy}
                       >
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-sm font-semibold">{receiver.deviceName}</span>
@@ -972,6 +1041,7 @@ function App() {
                     placeholder="192.168.1.20:5000"
                     value={targetAddr}
                     onChange={(event) => setTargetAddr(event.target.value)}
+                    disabled={sendBusy}
                   />
                 </label>
 
@@ -981,6 +1051,7 @@ function App() {
                     className="w-full rounded-xl border border-border px-3 py-2"
                     value={serverName}
                     onChange={(event) => setServerName(event.target.value)}
+                    disabled={sendBusy}
                   />
                 </label>
 
@@ -992,13 +1063,14 @@ function App() {
                       placeholder="C:\\path\\receiver-cert.der"
                       value={certificatePath}
                       onChange={(event) => setCertificatePath(event.target.value)}
+                      disabled={sendBusy}
                     />
                     <button
                       className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
                       onClick={() => {
                         void pickCertificate();
                       }}
-                      disabled={!tauriReady}
+                      disabled={!tauriReady || sendBusy}
                     >
                       Browse
                     </button>
@@ -1016,7 +1088,7 @@ function App() {
                     onClick={() => {
                       void refreshDrives();
                     }}
-                    disabled={!tauriReady || drivesBusy}
+                    disabled={!tauriReady || drivesBusy || sendBusy}
                   >
                     {drivesBusy ? "Loading..." : "Refresh Drives"}
                   </button>
@@ -1036,6 +1108,7 @@ function App() {
                             : "border-border bg-white",
                         ].join(" ")}
                         onClick={() => setSelectedDriveId(drive.id)}
+                        disabled={sendBusy}
                       >
                         <div className="text-sm font-semibold">{drive.driveLetter} - {drive.label}</div>
                         <div className="mt-1 text-xs text-muted">
@@ -1057,13 +1130,14 @@ function App() {
                     placeholder="Choose local destination"
                     value={localDestinationPath}
                     onChange={(event) => setLocalDestinationPath(event.target.value)}
+                    disabled={sendBusy}
                   />
                   <button
                     className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
                     onClick={() => {
                       void pickLocalDestination();
                     }}
-                    disabled={!tauriReady}
+                    disabled={!tauriReady || sendBusy}
                   >
                     Browse
                   </button>
@@ -1078,6 +1152,7 @@ function App() {
                   className="w-full rounded-xl border border-border px-3 py-2 font-mono"
                   value={chunkSize}
                   onChange={(event) => setChunkSize(event.target.value)}
+                  disabled={sendBusy}
                 />
               </label>
 
@@ -1087,6 +1162,7 @@ function App() {
                   className="w-full rounded-xl border border-border px-3 py-2 font-mono"
                   value={parallelism}
                   onChange={(event) => setParallelism(event.target.value)}
+                  disabled={sendBusy}
                 />
               </label>
 
@@ -1104,26 +1180,33 @@ function App() {
             </div>
 
             {sendBusy ? (
-              <div className="mt-3 flex gap-2">
-                <button
-                  className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
-                  onClick={() => {
-                    void controlActiveSend(sendPaused ? "resume" : "pause");
-                  }}
-                  disabled={!tauriReady}
-                >
-                  {sendPaused ? "Resume" : "Pause"}
-                </button>
-                <button
-                  className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-4 py-2 text-sm text-[#b42318]"
-                  onClick={() => {
-                    void controlActiveSend("stop");
-                  }}
-                  disabled={!tauriReady}
-                >
-                  Stop
-                </button>
-              </div>
+              <>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                    onClick={() => {
+                      void controlActiveSend(sendPaused ? "resume" : "pause");
+                    }}
+                    disabled={!tauriReady}
+                  >
+                    {sendPaused ? "Resume" : "Pause"}
+                  </button>
+                  <button
+                    className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-4 py-2 text-sm text-[#b42318]"
+                    onClick={() => {
+                      void controlActiveSend("stop");
+                    }}
+                    disabled={!tauriReady}
+                  >
+                    Stop
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-muted">
+                  {sendPaused
+                    ? "Transfer is paused. Click Resume to continue from current progress."
+                    : "Transfer is active. You can pause or stop at any time."}
+                </p>
+              </>
             ) : null}
 
             {sourceSummary ? (
@@ -1229,9 +1312,17 @@ function App() {
 
               <div className="mt-4 h-2 w-full rounded-full bg-[#e7efef]">
                 <div
-                  className="h-2 rounded-full bg-accent transition-all duration-200"
+                  className={[
+                    "h-2 rounded-full transition-all duration-200",
+                    sendPaused ? "bg-[#d99a12]" : "bg-accent",
+                  ].join(" ")}
                   style={{ width: `${sendPercent.toFixed(2)}%` }}
                 />
+              </div>
+
+              <div className="mt-2 flex items-center justify-between text-xs text-muted">
+                <span>{sendPercent.toFixed(2)}%</span>
+                {sendStatusMeta ? <span>{sendStatusMeta}</span> : null}
               </div>
 
               {sendStatus.progress ? (
