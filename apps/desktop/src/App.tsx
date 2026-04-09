@@ -29,12 +29,20 @@ import {
 } from "./lib/tauriClient";
 
 type DestinationMode = "nearby" | "manual" | "usb" | "local";
+type WorkspaceTab = "send" | "receive" | "history" | "settings";
 
 const DESTINATION_MODES: Array<{ key: DestinationMode; label: string }> = [
   { key: "nearby", label: "Nearby Device" },
   { key: "manual", label: "Manual Address" },
   { key: "usb", label: "USB / External Drive" },
   { key: "local", label: "Local Folder" },
+];
+
+const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
+  { key: "send", label: "Send" },
+  { key: "receive", label: "Receive" },
+  { key: "history", label: "History" },
+  { key: "settings", label: "Settings" },
 ];
 
 type TransferDirection = "send" | "receive";
@@ -168,6 +176,7 @@ function App() {
   const [inspectBusy, setInspectBusy] = useState(false);
 
   const [destinationMode, setDestinationMode] = useState<DestinationMode>("nearby");
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceTab>("send");
 
   const [receivers, setReceivers] = useState<ReceiverListItem[]>([]);
   const [selectedPeerId, setSelectedPeerId] = useState("");
@@ -962,7 +971,7 @@ function App() {
             <div className="mt-1 break-all">{sourcePath || "No source selected"}</div>
           </div>
 
-          <section className="mt-6 rounded-xl border border-border bg-white p-4">
+          {/* <section className="mt-6 rounded-xl border border-border bg-white p-4">
             <div className="flex items-center justify-between">
               <div className="text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
               <button
@@ -1033,29 +1042,17 @@ function App() {
                 Use Recommended Tuning
               </button>
             ) : null}
-          </section>
-
+          </section> */}
           {/* <section className="mt-6 rounded-xl border border-border bg-white p-4 text-xs text-muted">
             <div className="flex items-center justify-between">
               <div className="font-semibold uppercase tracking-wide">Recent History</div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="rounded-lg border border-border px-2 py-1 text-[11px]"
-                  onClick={() => {
-                    document.getElementById("history-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
-                  }}
-                  disabled={historyEntries.length === 0}
-                >
-                  Open
-                </button>
-                <button
-                  className="rounded-lg border border-border px-2 py-1 text-[11px]"
-                  onClick={clearHistory}
-                  disabled={historyEntries.length === 0}
-                >
-                  Clear
-                </button>
-              </div>
+              <button
+                className="rounded-lg border border-border px-2 py-1 text-[11px]"
+                onClick={() => setActiveWorkspace("history")}
+                disabled={historyEntries.length === 0}
+              >
+                Open
+              </button>
             </div>
 
             {recentHistoryEntries.length === 0 ? (
@@ -1065,9 +1062,7 @@ function App() {
                 {recentHistoryEntries.map((entry) => (
                   <div key={entry.id} className="rounded-lg border border-border bg-[#f8fbfb] p-2">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="font-semibold text-ink">
-                        {entry.direction === "send" ? "Send" : "Receive"}
-                      </div>
+                      <div className="font-semibold text-ink">{entry.direction === "send" ? "Send" : "Receive"}</div>
                       <span
                         className={[
                           "rounded-full px-2 py-1 text-[10px] font-mono",
@@ -1082,15 +1077,6 @@ function App() {
                       </span>
                     </div>
                     <div className="mt-1 truncate">{entry.message}</div>
-                    <div className="mt-1 text-[11px]">{new Date(entry.createdAt).toLocaleString()}</div>
-                    {entry.direction === "send" ? (
-                      <button
-                        className="mt-2 rounded-lg border border-border bg-white px-2 py-1 text-[11px]"
-                        onClick={() => applyHistorySettings(entry)}
-                      >
-                        Reuse
-                      </button>
-                    ) : null}
                   </div>
                 ))}
               </div>
@@ -1100,14 +1086,19 @@ function App() {
 
         <main className="space-y-5">
           <section className="sticky top-5 z-20 rounded-2xl border border-border bg-panel/95 p-4 shadow-card backdrop-blur">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold">{transferBarTitle}</div>
                 <div className="text-xs text-muted">{transferBarMessage}</div>
               </div>
-              <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(transferBarState)}`}>
-                {transferBarState}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(sendStatus.state)}`}>
+                  send: {sendStatus.state}
+                </span>
+                <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(receiverStatus.state)}`}>
+                  recv: {receiverStatus.state}
+                </span>
+              </div>
             </div>
 
             <div className="mt-3 h-2 w-full rounded-full bg-[#e7efef]">
@@ -1122,38 +1113,103 @@ function App() {
 
             <div className="mt-2 flex items-center justify-between text-xs text-muted">
               <span>{transferBarPercent.toFixed(2)}%</span>
-              {transferBarMeta ? <span>{transferBarMeta}</span> : null}
+              {transferBarMeta ? <span>{transferBarMeta}</span> : <span>Idle</span>}
             </div>
 
             {transferBarCurrentPath ? (
               <div className="mt-1 truncate text-xs text-muted">Current: {transferBarCurrentPath}</div>
             ) : null}
 
-            {sendIsActive ? (
-              <div className="mt-3 flex gap-2">
+            <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+              <div className="rounded-xl border border-border bg-white p-3 text-xs text-muted">
+                <div className="font-semibold text-ink">Live Metrics</div>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                  <span>
+                    Send: {sendPercent.toFixed(2)}%
+                    {sendStatusMeta ? ` (${sendStatusMeta})` : ""}
+                  </span>
+                  <span>Receiver: {receiverPercent.toFixed(2)}%</span>
+                  <span>Throughput: {transferBarMeta ?? "-"}</span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {sendIsActive ? (
+                  <>
+                    <button
+                      className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                      onClick={() => {
+                        void controlActiveSend(sendPaused ? "resume" : "pause");
+                      }}
+                      disabled={!tauriReady}
+                    >
+                      {sendPaused ? "Resume" : "Pause"}
+                    </button>
+                    <button
+                      className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-3 py-1 text-xs text-[#b42318]"
+                      onClick={() => {
+                        void controlActiveSend("stop");
+                      }}
+                      disabled={!tauriReady}
+                    >
+                      Stop Send
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    onClick={() => setActiveWorkspace("send")}
+                  >
+                    Open Send
+                  </button>
+                )}
+
                 <button
                   className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
                   onClick={() => {
-                    void controlActiveSend(sendPaused ? "resume" : "pause");
+                    void startReceiver();
+                    setActiveWorkspace("receive");
                   }}
-                  disabled={!tauriReady}
+                  disabled={!tauriReady || receiverBusy}
                 >
-                  {sendPaused ? "Resume" : "Pause"}
+                  Start Receiver
                 </button>
                 <button
-                  className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-3 py-1 text-xs text-[#b42318]"
+                  className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
                   onClick={() => {
-                    void controlActiveSend("stop");
+                    void stopReceiver();
+                    setActiveWorkspace("receive");
                   }}
                   disabled={!tauriReady}
                 >
-                  Stop
+                  Stop Receiver
                 </button>
               </div>
-            ) : null}
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-border bg-panel p-2 shadow-card">
+            <div className="flex flex-wrap gap-2">
+              {WORKSPACE_TABS.map((workspace) => (
+                <button
+                  key={workspace.key}
+                  className={[
+                    "rounded-full px-4 py-2 text-sm",
+                    activeWorkspace === workspace.key
+                      ? "bg-accent text-white"
+                      : "border border-border bg-white text-muted",
+                  ].join(" ")}
+                  onClick={() => setActiveWorkspace(workspace.key)}
+                >
+                  {workspace.label}
+                  {workspace.key === "history" ? ` (${historyEntries.length})` : ""}
+                </button>
+              ))}
+            </div>
           </section>
           <div className="space-y-5">
-            <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+          {activeWorkspace === "send" ? (
+            <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-xl font-semibold">Send</h2>
@@ -1460,8 +1516,10 @@ function App() {
               </div>
             ) : null}
           </section>
+          ) : null}
 
-          <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+          {activeWorkspace === "receive" ? (
+            <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-xl font-semibold">Receive</h2>
@@ -1522,159 +1580,176 @@ function App() {
               </label>
             </div>
           </section>
+          ) : null}
 
-          <section className="grid gap-5 lg:grid-cols-2">
-            <article className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+          {activeWorkspace === "history" ? (
+            <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
               <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold">Send Status</h3>
-                <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(sendStatus.state)}`}>
-                  {sendStatus.state}
-                </span>
+                <h3 className="text-lg font-semibold">History</h3>
+                <button
+                  className="rounded-xl border border-border bg-white px-3 py-2 text-xs"
+                  onClick={clearHistory}
+                  disabled={historyEntries.length === 0}
+                >
+                  Clear History
+                </button>
               </div>
 
-              <p className="mt-3 text-sm text-muted">{sendStatus.message}</p>
-
-              <div className="mt-4 h-2 w-full rounded-full bg-[#e7efef]">
-                <div
-                  className={[
-                    "h-2 rounded-full transition-all duration-200",
-                    sendPaused ? "bg-[#d99a12]" : "bg-accent",
-                  ].join(" ")}
-                  style={{ width: `${sendPercent.toFixed(2)}%` }}
-                />
-              </div>
-
-              <div className="mt-2 flex items-center justify-between text-xs text-muted">
-                <span>{sendPercent.toFixed(2)}%</span>
-                {sendStatusMeta ? <span>{sendStatusMeta}</span> : null}
-              </div>
-
-              {sendStatus.progress ? (
-                <div className="mt-3 space-y-1 text-xs text-muted">
-                  <div>{sendStatus.progress.label}</div>
-                  <div>
-                    {sendStatus.progress.completedFiles}/{sendStatus.progress.totalFiles} files | {formatBytes(sendStatus.progress.transferredBytes)} / {formatBytes(sendStatus.progress.totalBytes)} | {sendStatus.progress.averageMibPerSec.toFixed(2)} MiB/s
-                  </div>
-                  {sendStatus.progress.currentPath ? <div>Current: {sendStatus.progress.currentPath}</div> : null}
-                </div>
-              ) : null}
-
-              {sendStatus.summary ? (
-                <div className="mt-3 rounded-xl border border-border bg-white p-3 text-xs text-muted">
-                  <div className="font-semibold text-ink">Completed Summary</div>
-                  <div className="mt-1">Output: {sendStatus.summary.fileName}</div>
-                  <div>Transferred: {formatBytes(sendStatus.summary.bytesTransferred)}</div>
-                  <div>Elapsed: {sendStatus.summary.elapsedSecs.toFixed(2)}s</div>
-                  <div>Integrity: {sendStatus.summary.integrityVerified ? "Verified" : "Not verified"}</div>
-                </div>
-              ) : null}
-            </article>
-
-            <article className="rounded-2xl border border-border bg-panel p-6 shadow-card">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold">Receiver Status</h3>
-                <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(receiverStatus.state)}`}>
-                  {receiverStatus.state}
-                </span>
-              </div>
-
-              <p className="mt-3 text-sm text-muted">{receiverStatus.message}</p>
-
-              <div className="mt-4 h-2 w-full rounded-full bg-[#e7efef]">
-                <div
-                  className="h-2 rounded-full bg-accent transition-all duration-200"
-                  style={{ width: `${receiverPercent.toFixed(2)}%` }}
-                />
-              </div>
-
-              {receiverStatus.progress ? (
-                <div className="mt-3 space-y-1 text-xs text-muted">
-                  <div>{receiverStatus.progress.label}</div>
-                  <div>
-                    {receiverStatus.progress.completedFiles}/{receiverStatus.progress.totalFiles} files | {formatBytes(receiverStatus.progress.transferredBytes)} / {formatBytes(receiverStatus.progress.totalBytes)} | {receiverStatus.progress.averageMibPerSec.toFixed(2)} MiB/s
-                  </div>
-                  {receiverStatus.progress.currentPath ? <div>Current: {receiverStatus.progress.currentPath}</div> : null}
-                </div>
-              ) : null}
-
-              <div className="mt-3 space-y-1 text-xs text-muted">
-                {receiverStatus.bindAddr ? <div>Bind: {receiverStatus.bindAddr}</div> : null}
-                {receiverStatus.outputDirLabel ? <div>Output: {receiverStatus.outputDirLabel}</div> : null}
-                {receiverStatus.savedPathLabel ? <div>Saved: {receiverStatus.savedPathLabel}</div> : null}
-                {receiverStatus.remoteAddress ? <div>Remote: {receiverStatus.remoteAddress}</div> : null}
-              </div>
-            </article>
-          </section>
-
-          <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">History</h3>
-              <button
-                className="rounded-xl border border-border bg-white px-3 py-2 text-xs"
-                onClick={clearHistory}
-                disabled={historyEntries.length === 0}
-              >
-                Clear History
-              </button>
-            </div>
-
-            {historyEntries.length === 0 ? (
-              <p className="mt-3 text-sm text-muted">No transfers recorded yet.</p>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {historyEntries.map((entry) => (
-                  <div key={entry.id} className="rounded-xl border border-border bg-white p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-semibold text-ink">
-                        {entry.direction === "send" ? "Send" : "Receive"}
+              {historyEntries.length === 0 ? (
+                <p className="mt-3 text-sm text-muted">No transfers recorded yet.</p>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {historyEntries.map((entry) => (
+                    <div key={entry.id} className="rounded-xl border border-border bg-white p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-ink">
+                          {entry.direction === "send" ? "Send" : "Receive"}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={[
+                              "rounded-full px-2 py-1 text-[11px] font-mono",
+                              entry.result === "completed"
+                                ? "bg-accentSoft text-accent"
+                                : entry.result === "stopped"
+                                ? "bg-[#fff4e5] text-[#9a5b00]"
+                                : "bg-[#fde8e8] text-[#b42318]",
+                            ].join(" ")}
+                          >
+                            {entry.result}
+                          </span>
+                          <span className="text-[11px] text-muted">
+                            {new Date(entry.createdAt).toLocaleString()}
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={[
-                            "rounded-full px-2 py-1 text-[11px] font-mono",
-                            entry.result === "completed"
-                              ? "bg-accentSoft text-accent"
-                              : entry.result === "stopped"
-                              ? "bg-[#fff4e5] text-[#9a5b00]"
-                              : "bg-[#fde8e8] text-[#b42318]",
-                          ].join(" ")}
-                        >
-                          {entry.result}
-                        </span>
-                        <span className="text-[11px] text-muted">
-                          {new Date(entry.createdAt).toLocaleString()}
-                        </span>
+
+                      <p className="mt-2 text-xs text-muted">{entry.message}</p>
+
+                      <div className="mt-2 grid gap-1 text-[11px] text-muted md:grid-cols-2">
+                        {entry.sourcePath ? <div>Source: {entry.sourcePath}</div> : null}
+                        {entry.destinationPath ? <div>Destination: {entry.destinationPath}</div> : null}
+                        {entry.destinationMode ? <div>Mode: {entry.destinationMode}</div> : null}
+                        {entry.bytesTransferred ? <div>Bytes: {formatBytes(entry.bytesTransferred)}</div> : null}
+                        {entry.averageMibPerSec ? <div>Speed: {entry.averageMibPerSec.toFixed(2)} MiB/s</div> : null}
+                        {typeof entry.integrityVerified === "boolean" ? (
+                          <div>Integrity: {entry.integrityVerified ? "Verified" : "Not verified"}</div>
+                        ) : null}
                       </div>
-                    </div>
 
-                    <p className="mt-2 text-xs text-muted">{entry.message}</p>
-
-                    <div className="mt-2 grid gap-1 text-[11px] text-muted md:grid-cols-2">
-                      {entry.sourcePath ? <div>Source: {entry.sourcePath}</div> : null}
-                      {entry.destinationPath ? <div>Destination: {entry.destinationPath}</div> : null}
-                      {entry.destinationMode ? <div>Mode: {entry.destinationMode}</div> : null}
-                      {entry.bytesTransferred ? <div>Bytes: {formatBytes(entry.bytesTransferred)}</div> : null}
-                      {entry.averageMibPerSec ? <div>Speed: {entry.averageMibPerSec.toFixed(2)} MiB/s</div> : null}
-                      {typeof entry.integrityVerified === "boolean" ? (
-                        <div>Integrity: {entry.integrityVerified ? "Verified" : "Not verified"}</div>
+                      {entry.direction === "send" ? (
+                        <div className="mt-3">
+                          <button
+                            className="rounded-lg border border-border bg-white px-3 py-1 text-xs"
+                            onClick={() => {
+                              applyHistorySettings(entry);
+                              setActiveWorkspace("send");
+                            }}
+                          >
+                            Reuse Settings
+                          </button>
+                        </div>
                       ) : null}
                     </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : null}
 
-                    {entry.direction === "send" ? (
-                      <div className="mt-3">
-                        <button
-                          className="rounded-lg border border-border bg-white px-3 py-1 text-xs"
-                          onClick={() => applyHistorySettings(entry)}
-                        >
-                          Reuse Settings
-                        </button>
-                      </div>
-                    ) : null}
+          {activeWorkspace === "settings" ? (
+            <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+              <h2 className="text-xl font-semibold">Settings</h2>
+              <p className="mt-1 text-sm text-muted">Tune transfer defaults and receiver preferences.</p>
+
+              <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                <label className="text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Default Server Name</div>
+                  <input
+                    className="w-full rounded-xl border border-border px-3 py-2"
+                    value={serverName}
+                    onChange={(event) => setServerName(event.target.value)}
+                    disabled={sendBusy}
+                  />
+                </label>
+
+                <label className="text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Advertised Device Name</div>
+                  <input
+                    className="w-full rounded-xl border border-border px-3 py-2"
+                    value={receiverDeviceName}
+                    onChange={(event) => setReceiverDeviceName(event.target.value)}
+                  />
+                </label>
+
+                <label className="text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Default Chunk Size</div>
+                  <input
+                    className="w-full rounded-xl border border-border px-3 py-2 font-mono"
+                    value={chunkSize}
+                    onChange={(event) => setChunkSize(event.target.value)}
+                    disabled={sendBusy}
+                  />
+                </label>
+
+                <label className="text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Default Parallelism</div>
+                  <input
+                    className="w-full rounded-xl border border-border px-3 py-2 font-mono"
+                    value={parallelism}
+                    onChange={(event) => setParallelism(event.target.value)}
+                    disabled={sendBusy}
+                  />
+                </label>
+
+                <label className="text-sm lg:col-span-2">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Default Receive Folder</div>
+                  <div className="flex gap-2">
+                    <input
+                      className="w-full rounded-xl border border-border px-3 py-2"
+                      value={receiverOutputDir}
+                      onChange={(event) => setReceiverOutputDir(event.target.value)}
+                    />
+                    <button
+                      className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
+                      onClick={() => {
+                        void pickReceiverOutputDir();
+                      }}
+                      disabled={!tauriReady}
+                    >
+                      Browse
+                    </button>
                   </div>
-                ))}
+                </label>
               </div>
-            )}
-          </section>
+
+              <div className="mt-5 flex flex-wrap gap-2">
+                <button
+                  className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                  onClick={() => {
+                    setServerName(DEFAULT_SERVER_NAME);
+                    setChunkSize("1048576");
+                    setParallelism("4");
+                  }}
+                  disabled={sendBusy}
+                >
+                  Reset Defaults
+                </button>
+                {sourceSummary ? (
+                  <button
+                    className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                    onClick={() => {
+                      setChunkSize(String(sourceSummary.recommendedChunkSize));
+                      setParallelism(String(sourceSummary.recommendedParallelism));
+                    }}
+                    disabled={sendBusy}
+                  >
+                    Use Recommended Tuning
+                  </button>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
           </div>
         </main>
       </div>
@@ -1683,7 +1758,6 @@ function App() {
 }
 
 export default App;
-
 
 
 
