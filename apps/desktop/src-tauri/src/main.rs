@@ -283,9 +283,46 @@ where
     Ok(open_dialog().map(|path| path.display().to_string()))
 }
 
+#[cfg(target_os = "windows")]
+fn run_dialog_many_with_timeout<F>(open_dialog: F) -> Result<Vec<String>, String>
+where
+    F: FnOnce() -> Option<Vec<PathBuf>> + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let selected = open_dialog()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        let _ = sender.send(selected);
+    });
+
+    receiver
+        .recv_timeout(FILE_DIALOG_TIMEOUT)
+        .map_err(|_| "The file dialog timed out. Please try again.".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_dialog_many_with_timeout<F>(open_dialog: F) -> Result<Vec<String>, String>
+where
+    F: FnOnce() -> Option<Vec<PathBuf>>,
+{
+    Ok(open_dialog()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect())
+}
+
 #[tauri::command]
 fn pick_source_file() -> Result<Option<String>, String> {
     run_dialog_with_timeout(|| FileDialog::new().set_title("Choose a file to send").pick_file())
+}
+
+#[tauri::command]
+fn pick_source_files() -> Result<Vec<String>, String> {
+    run_dialog_many_with_timeout(|| FileDialog::new().set_title("Choose files to send").pick_files())
 }
 
 #[tauri::command]
@@ -1488,6 +1525,7 @@ fn main() {
         .manage(DesktopState::default())
         .invoke_handler(tauri::generate_handler![
             pick_source_file,
+            pick_source_files,
             pick_source_folder,
             inspect_source,
             pick_certificate_file,

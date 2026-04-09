@@ -164,6 +164,10 @@ export function pickSourceFile(): Promise<string | null> {
   return invoke<string | null>("pick_source_file");
 }
 
+export function pickSourceFiles(): Promise<string[]> {
+  return invoke<string[]>("pick_source_files");
+}
+
 export function pickSourceFolder(): Promise<string | null> {
   return invoke<string | null>("pick_source_folder");
 }

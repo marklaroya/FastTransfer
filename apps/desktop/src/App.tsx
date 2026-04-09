@@ -11,6 +11,7 @@ import {
   pickLocalDestinationFolder,
   pickReceiveFolder,
   pickSourceFile,
+  pickSourceFiles,
   pickSourceFolder,
   startLocalCopyTransfer,
   startReceiver as startReceiverCommand,
@@ -77,6 +78,19 @@ type SendAttemptContext = {
   selectedPeerId?: string;
   targetAddr?: string;
   certificatePath?: string;
+  chunkSize: number;
+  parallelism: number;
+};
+
+type BatchSendPlan = {
+  sources: string[];
+  currentIndex: number;
+  destinationMode: DestinationMode;
+  destinationPath?: string;
+  selectedPeerId?: string;
+  targetAddr?: string;
+  certificatePath?: string;
+  serverName: string;
   chunkSize: number;
   parallelism: number;
 };
@@ -194,7 +208,7 @@ function stateChipClasses(state: string): string {
 function App() {
   const tauriReady = useMemo(() => isTauriRuntime(), []);
 
-  const [sourcePath, setSourcePath] = useState("");
+  const [sourcePaths, setSourcePaths] = useState<string[]>([]);
   const [sourceSummary, setSourceSummary] = useState<PackageSummary | null>(null);
   const [inspectBusy, setInspectBusy] = useState(false);
 
@@ -244,6 +258,8 @@ function App() {
   const activeSendAttemptRef = useRef<SendAttemptContext | null>(null);
   const sendPausedRef = useRef(false);
   const [sendPaused, setSendPaused] = useState(false);
+  const batchSendPlanRef = useRef<BatchSendPlan | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const lastReceiverTerminalKeyRef = useRef("");
 
   function updateSendPaused(value: boolean) {
@@ -272,7 +288,7 @@ function App() {
     }
 
     if (entry.sourcePath) {
-      setSourcePath(entry.sourcePath);
+      setSourcePaths([entry.sourcePath]);
       if (tauriReady) {
         void inspectSelectedSource(entry.sourcePath);
       }
@@ -386,8 +402,6 @@ function App() {
           payload.state === "error" ||
           payload.state === "stopped"
         ) {
-          setSendBusy(false);
-
           const attempt = activeSendAttemptRef.current;
           if (attempt) {
             const result: TransferResult =
@@ -418,6 +432,36 @@ function App() {
             });
           }
 
+          const activePlan = batchSendPlanRef.current;
+          if (
+            payload.state === "completed" &&
+            activePlan &&
+            activePlan.currentIndex + 1 < activePlan.sources.length
+          ) {
+            activePlan.currentIndex += 1;
+            setBatchProgress({ current: activePlan.currentIndex + 1, total: activePlan.sources.length });
+            const nextSource = activePlan.sources[activePlan.currentIndex];
+
+            activeSendAttemptRef.current = null;
+            void startTransferForSource(nextSource, activePlan).catch((error) => {
+              const message = `Could not continue batch transfer: ${asErrorMessage(error)}`;
+              setUiError(message);
+              setSendBusy(false);
+              setBatchProgress(null);
+              batchSendPlanRef.current = null;
+              activeSendAttemptRef.current = null;
+              updateSendPaused(false);
+              setSendStatus({
+                state: "error",
+                message,
+              });
+            });
+            return;
+          }
+
+          setSendBusy(false);
+          setBatchProgress(null);
+          batchSendPlanRef.current = null;
           activeSendAttemptRef.current = null;
         }
       });
@@ -573,6 +617,33 @@ function App() {
     }
   }
 
+  function normalizeUniquePaths(paths: string[]): string[] {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+
+    for (const path of paths) {
+      const trimmed = path.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      ordered.push(trimmed);
+    }
+
+    return ordered;
+  }
+
+  async function setSingleSource(path: string) {
+    setSourcePaths([path]);
+    await inspectSelectedSource(path);
+  }
+
   async function pickSource(command: "pick_source_file" | "pick_source_folder") {
     if (!tauriReady) {
       setUiError("Tauri runtime not available.");
@@ -591,13 +662,61 @@ function App() {
         return;
       }
 
-      setSourcePath(selectedPath);
-      await inspectSelectedSource(selectedPath);
+      await setSingleSource(selectedPath);
     } catch (error) {
       setUiError(`Could not choose source: ${asErrorMessage(error)}`);
     }
   }
 
+  async function addSourceFiles() {
+    if (!tauriReady) {
+      setUiError("Tauri runtime not available.");
+      return;
+    }
+
+    setUiError("");
+
+    try {
+      const selectedPaths = await withTimeout(
+        pickSourceFiles(),
+        FILE_PICKER_TIMEOUT_MS,
+        "Source picker timed out. Try again or paste a path manually."
+      );
+
+      if (selectedPaths.length === 0) {
+        return;
+      }
+
+      const merged = normalizeUniquePaths([...sourcePaths, ...selectedPaths]);
+      setSourcePaths(merged);
+
+      if (merged.length === 1) {
+        await inspectSelectedSource(merged[0]);
+      } else {
+        setSourceSummary(null);
+        setUiNote(`Queued ${merged.length} source paths for batch send.`);
+      }
+    } catch (error) {
+      setUiError(`Could not add files: ${asErrorMessage(error)}`);
+    }
+  }
+
+  function removeSourceAt(index: number) {
+    setSourcePaths((previous) => {
+      const next = previous.filter((_, itemIndex) => itemIndex !== index);
+      if (next.length === 1 && tauriReady) {
+        void inspectSelectedSource(next[0]);
+      } else if (next.length !== 1) {
+        setSourceSummary(null);
+      }
+      return next;
+    });
+  }
+
+  function clearSources() {
+    setSourcePaths([]);
+    setSourceSummary(null);
+  }
   async function refreshReceivers() {
     if (!tauriReady) {
       setUiError("Tauri runtime not available.");
@@ -818,15 +937,101 @@ function App() {
   }
 
 
+  async function startTransferForSource(source: string, plan: BatchSendPlan) {
+    const baseAttempt = {
+      sourcePath: source,
+      destinationMode: plan.destinationMode,
+      chunkSize: plan.chunkSize,
+      parallelism: plan.parallelism,
+    };
+
+    const batchPrefix =
+      plan.sources.length > 1
+        ? `Batch ${plan.currentIndex + 1}/${plan.sources.length}: `
+        : "";
+
+    if (plan.destinationMode === "local" || plan.destinationMode === "usb") {
+      const destinationPath = plan.destinationPath ?? "";
+      activeSendAttemptRef.current = {
+        ...baseAttempt,
+        attemptId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+        startedAt: Date.now(),
+        destinationPath,
+      };
+
+      await startLocalCopyTransfer({
+        sourcePath: source,
+        destinationPath,
+        destinationKind: plan.destinationMode === "usb" ? "usb_drive" : "local_folder",
+        chunkSize: plan.chunkSize,
+        parallelism: plan.parallelism,
+      });
+
+      setSendStatus({
+        state: "starting",
+        message: `${batchPrefix}Local copy started.`,
+      });
+      return;
+    }
+
+    if (plan.destinationMode === "nearby") {
+      const peerId = plan.selectedPeerId ?? "";
+      activeSendAttemptRef.current = {
+        ...baseAttempt,
+        attemptId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+        startedAt: Date.now(),
+        selectedPeerId: peerId,
+      };
+
+      await startSendCommand({
+        sourcePath: source,
+        selectedPeerId: peerId,
+        serverName: plan.serverName,
+        chunkSize: plan.chunkSize,
+        parallelism: plan.parallelism,
+      });
+
+      setSendStatus({
+        state: "starting",
+        message: `${batchPrefix}Transfer started using nearby receiver mode.`,
+      });
+      return;
+    }
+
+    const manualAddress = plan.targetAddr ?? "";
+    const manualCertificate = plan.certificatePath ?? "";
+    activeSendAttemptRef.current = {
+      ...baseAttempt,
+      attemptId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+      startedAt: Date.now(),
+      targetAddr: manualAddress,
+      certificatePath: manualCertificate,
+    };
+
+    await startSendCommand({
+      sourcePath: source,
+      targetAddr: manualAddress,
+      certificatePath: manualCertificate,
+      serverName: plan.serverName,
+      chunkSize: plan.chunkSize,
+      parallelism: plan.parallelism,
+    });
+
+    setSendStatus({
+      state: "starting",
+      message: `${batchPrefix}Transfer started using manual mode.`,
+    });
+  }
+
   async function startTransfer() {
     if (!tauriReady) {
       setUiError("Tauri runtime not available.");
       return;
     }
 
-    const source = sourcePath.trim();
-    if (source.length === 0) {
-      setUiError("Choose a source file or folder before sending.");
+    const sources = normalizeUniquePaths(sourcePaths);
+    if (sources.length === 0) {
+      setUiError("Choose at least one source file or folder before sending.");
       return;
     }
 
@@ -838,112 +1043,77 @@ function App() {
       return;
     }
 
-    updateSendPaused(false);
-    setSendBusy(true);
-    setUiError("");
+    const resolvedServerName = toOptionalText(serverName) ?? DEFAULT_SERVER_NAME;
 
-    const baseAttempt = {
-      sourcePath: source,
+    let destinationPath: string | undefined;
+    let resolvedPeerId: string | undefined;
+    let resolvedTargetAddr: string | undefined;
+    let resolvedCertificatePath: string | undefined;
+
+    if (destinationMode === "local" || destinationMode === "usb") {
+      destinationPath = destinationMode === "usb" ? selectedDrive?.mountPath ?? "" : localDestinationPath.trim();
+      if (!destinationPath) {
+        setUiError(
+          destinationMode === "usb"
+            ? "Select a removable drive before sending."
+            : "Choose a local destination folder before sending."
+        );
+        return;
+      }
+    }
+
+    if (destinationMode === "nearby") {
+      if (!selectedPeerId) {
+        setUiError("Select a nearby receiver before sending.");
+        return;
+      }
+      resolvedPeerId = selectedPeerId;
+    }
+
+    if (destinationMode === "manual") {
+      resolvedTargetAddr = targetAddr.trim();
+      resolvedCertificatePath = certificatePath.trim();
+      if (!resolvedTargetAddr || !resolvedCertificatePath) {
+        setUiError("Manual mode requires receiver address and certificate path.");
+        return;
+      }
+    }
+
+    const plan: BatchSendPlan = {
+      sources,
+      currentIndex: 0,
       destinationMode,
+      destinationPath,
+      selectedPeerId: resolvedPeerId,
+      targetAddr: resolvedTargetAddr,
+      certificatePath: resolvedCertificatePath,
+      serverName: resolvedServerName,
       chunkSize: parsedChunkSize,
       parallelism: parsedParallelism,
     };
 
+    updateSendPaused(false);
+    setSendBusy(true);
+    setUiError("");
+
+    if (sources.length > 1) {
+      batchSendPlanRef.current = plan;
+      setBatchProgress({ current: 1, total: sources.length });
+      setSourceSummary(null);
+      setUiNote(`Starting batch send (${sources.length} items).`);
+    } else {
+      batchSendPlanRef.current = null;
+      setBatchProgress(null);
+    }
+
     try {
-      if (destinationMode === "local" || destinationMode === "usb") {
-        const destinationPath =
-          destinationMode === "usb"
-            ? selectedDrive?.mountPath ?? ""
-            : localDestinationPath.trim();
-
-        if (!destinationPath) {
-          throw new Error(
-            destinationMode === "usb"
-              ? "Select a removable drive before sending."
-              : "Choose a local destination folder before sending."
-          );
-        }
-
-        activeSendAttemptRef.current = {
-          ...baseAttempt,
-          attemptId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
-          startedAt: Date.now(),
-          destinationPath,
-        };
-
-        await startLocalCopyTransfer({
-          sourcePath: source,
-          destinationPath,
-          destinationKind: destinationMode === "usb" ? "usb_drive" : "local_folder",
-          chunkSize: parsedChunkSize,
-          parallelism: parsedParallelism,
-        });
-
-        setSendStatus({
-          state: "starting",
-          message: "Local copy started.",
-        });
-        return;
-      }
-
-      if (destinationMode === "nearby") {
-        if (!selectedPeerId) {
-          throw new Error("Select a nearby receiver before sending.");
-        }
-
-        activeSendAttemptRef.current = {
-          ...baseAttempt,
-          attemptId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
-          startedAt: Date.now(),
-          selectedPeerId,
-        };
-
-        await startSendCommand({
-          sourcePath: source,
-          selectedPeerId,
-          serverName: toOptionalText(serverName) ?? DEFAULT_SERVER_NAME,
-          chunkSize: parsedChunkSize,
-          parallelism: parsedParallelism,
-        });
-
-        setSendStatus({
-          state: "starting",
-          message: "Transfer started using nearby receiver mode.",
-        });
-        return;
-      }
-
-      const manualAddress = targetAddr.trim();
-      const manualCertificate = certificatePath.trim();
-      if (!manualAddress || !manualCertificate) {
-        throw new Error("Manual mode requires receiver address and certificate path.");
-      }
-
-      activeSendAttemptRef.current = {
-        ...baseAttempt,
-        attemptId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
-        startedAt: Date.now(),
-        targetAddr: manualAddress,
-        certificatePath: manualCertificate,
-      };
-
-      await startSendCommand({
-        sourcePath: source,
-        targetAddr: manualAddress,
-        certificatePath: manualCertificate,
-        serverName: toOptionalText(serverName) ?? DEFAULT_SERVER_NAME,
-        chunkSize: parsedChunkSize,
-        parallelism: parsedParallelism,
-      });
-
-      setSendStatus({
-        state: "starting",
-        message: "Transfer started using manual mode.",
-      });
+      await startTransferForSource(sources[0], plan);
     } catch (error) {
       const message = `Could not start transfer: ${asErrorMessage(error)}`;
       setSendBusy(false);
       setUiError(message);
+      setBatchProgress(null);
+      batchSendPlanRef.current = null;
 
       const attempt = activeSendAttemptRef.current;
       if (attempt) {
@@ -965,7 +1135,6 @@ function App() {
       activeSendAttemptRef.current = null;
     }
   }
-
   return (
     <div className="min-h-screen bg-canvas text-ink">
       <div className="mx-auto grid min-h-screen w-full max-w-[1640px] gap-6 p-5 lg:grid-cols-[300px_minmax(0,1fr)] 2xl:max-w-[1720px] 2xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -984,7 +1153,7 @@ function App() {
           ) : null}
 
           <div className="mt-6 space-y-2">
-            <button
+            {/* <button
               className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-sm font-medium"
               onClick={() => {
                 void pickSource("pick_source_file");
@@ -992,6 +1161,15 @@ function App() {
               disabled={!tauriReady || inspectBusy || sendBusy}
             >
               Select File
+            </button> */}
+            <button
+              className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-sm font-medium"
+              onClick={() => {
+                void addSourceFiles();
+              }}
+              disabled={!tauriReady || inspectBusy || sendBusy}
+            >
+              Add Files
             </button>
             <button
               className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-sm font-medium"
@@ -1005,10 +1183,48 @@ function App() {
           </div>
 
           <div className="mt-6 rounded-xl border border-border bg-white p-3 text-xs text-muted">
-            <div className="font-semibold text-ink">Source</div>
-            <div className="mt-1 break-all">{sourcePath || "No source selected"}</div>
-          </div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="font-semibold text-ink">Source</div>
+              <div className="text-[11px]">
+                {sourcePaths.length === 0
+                  ? "No source selected"
+                  : `${sourcePaths.length} selected`}
+              </div>
+            </div>
 
+            {sourcePaths.length > 0 ? (
+              <div className="mt-2 max-h-40 space-y-1 overflow-y-auto pr-1">
+                {sourcePaths.map((path, index) => (
+                  <div key={`${path}-${index}`} className="flex items-start gap-2 rounded-lg border border-border bg-[#f8fbfb] p-2">
+                    <div className="min-w-0 flex-1 break-all">{path}</div>
+                    <button
+                      className="rounded-md border border-border bg-white px-2 py-1 text-[11px]"
+                      onClick={() => removeSourceAt(index)}
+                      disabled={sendBusy}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {sourcePaths.length > 1 ? (
+              <button
+                className="mt-2 rounded-lg border border-border bg-white px-3 py-1 text-[11px]"
+                onClick={clearSources}
+                disabled={sendBusy}
+              >
+                Clear All
+              </button>
+            ) : null}
+
+            {batchProgress ? (
+              <div className="mt-2 text-[11px] text-muted">
+                Batch in progress: {batchProgress.current}/{batchProgress.total}
+              </div>
+            ) : null}
+          </div>
           {/* <section className="mt-6 rounded-xl border border-border bg-white p-4">
             <div className="flex items-center justify-between">
               <div className="text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
