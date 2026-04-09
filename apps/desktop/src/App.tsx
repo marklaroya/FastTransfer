@@ -177,6 +177,7 @@ function App() {
 
   const [destinationMode, setDestinationMode] = useState<DestinationMode>("nearby");
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceTab>("send");
+  const [showAdvancedSend, setShowAdvancedSend] = useState(false);
 
   const [receivers, setReceivers] = useState<ReceiverListItem[]>([]);
   const [selectedPeerId, setSelectedPeerId] = useState("");
@@ -212,7 +213,7 @@ function App() {
   const [uiError, setUiError] = useState("");
   const [uiNote, setUiNote] = useState(
     tauriReady
-      ? "Connected to Tauri runtime."
+      ? "Connected"
       : "Run this screen through `npm run tauri dev` to enable native commands."
   );
 
@@ -1425,38 +1426,55 @@ function App() {
               </div>
             ) : null}
 
-            <div className="mt-5 grid gap-3 md:grid-cols-3">
-              <label className="text-sm">
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Chunk Size</div>
-                <input
-                  className="w-full rounded-xl border border-border px-3 py-2 font-mono"
-                  value={chunkSize}
-                  onChange={(event) => setChunkSize(event.target.value)}
-                  disabled={sendBusy}
-                />
-              </label>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+              <button
+                className="rounded-xl border border-border bg-white px-3 py-2 text-xs"
+                onClick={() => setShowAdvancedSend((previous) => !previous)}
+                disabled={sendBusy}
+              >
+                {showAdvancedSend ? "Hide Advanced" : "Show Advanced"}
+              </button>
+              {!showAdvancedSend ? (
+                <div className="text-xs text-muted">
+                  Using optimized defaults (chunk {chunkSize}, parallel {parallelism}).
+                </div>
+              ) : null}
+            </div>
 
-              <label className="text-sm">
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Parallelism</div>
-                <input
-                  className="w-full rounded-xl border border-border px-3 py-2 font-mono"
-                  value={parallelism}
-                  onChange={(event) => setParallelism(event.target.value)}
-                  disabled={sendBusy}
-                />
-              </label>
+            {showAdvancedSend ? (
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <label className="text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Chunk Size</div>
+                  <input
+                    className="w-full rounded-xl border border-border px-3 py-2 font-mono"
+                    value={chunkSize}
+                    onChange={(event) => setChunkSize(event.target.value)}
+                    disabled={sendBusy}
+                  />
+                </label>
 
-              <div className="flex items-end">
-                <button
-                  className="w-full rounded-xl bg-accent px-5 py-3 text-sm font-semibold text-white disabled:opacity-60"
-                  onClick={() => {
-                    void startTransfer();
-                  }}
-                  disabled={!tauriReady || sendBusy || inspectBusy}
-                >
-                  {sendBusy ? "Working..." : "Send Package"}
-                </button>
+                <label className="text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Parallelism</div>
+                  <input
+                    className="w-full rounded-xl border border-border px-3 py-2 font-mono"
+                    value={parallelism}
+                    onChange={(event) => setParallelism(event.target.value)}
+                    disabled={sendBusy}
+                  />
+                </label>
               </div>
+            ) : null}
+
+            <div className="mt-3 flex items-end">
+              <button
+                className="w-full rounded-xl bg-accent px-5 py-3 text-sm font-semibold text-white disabled:opacity-60"
+                onClick={() => {
+                  void startTransfer();
+                }}
+                disabled={!tauriReady || sendBusy || inspectBusy}
+              >
+                {sendBusy ? "Working..." : "Send Package"}
+              </button>
             </div>
 
             {sendBusy ? (
@@ -1758,6 +1776,8 @@ function App() {
 }
 
 export default App;
+
+
 
 
 
