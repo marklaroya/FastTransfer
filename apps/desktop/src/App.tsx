@@ -83,6 +83,8 @@ type SendAttemptContext = {
 
 const HISTORY_STORAGE_KEY = "fasttransfer.desktop.history.v1";
 const MAX_HISTORY_ENTRIES = 40;
+const DRIVE_SCAN_TIMEOUT_MS = 6000;
+const FILE_PICKER_TIMEOUT_MS = 20000;
 
 function asErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
@@ -107,6 +109,27 @@ function toPositiveInteger(value: string): number | undefined {
     return undefined;
   }
   return parsed;
+}
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      });
+  });
 }
 
 function formatBytes(bytes: number): string {
@@ -448,12 +471,6 @@ function App() {
     };
   }, [tauriReady]);
 
-  useEffect(() => {
-    if (destinationMode === "usb" && tauriReady) {
-      void refreshDrives();
-    }
-  }, [destinationMode, tauriReady]);
-
   const selectedReceiver = receivers.find((item) => item.peerId === selectedPeerId) ?? null;
   const selectedDrive = drives.find((item) => item.id === selectedDriveId) ?? null;
   const filteredReceivers = useMemo(() => {
@@ -533,7 +550,7 @@ function App() {
     : receiverIsActive
     ? receiverStatus.progress?.currentPath
     : null;
-  const recentHistoryEntries = historyEntries.slice(0, 3);`r`
+  const recentHistoryEntries = historyEntries.slice(0, 3);
   async function inspectSelectedSource(path: string) {
     if (!tauriReady) {
       return;
@@ -565,7 +582,11 @@ function App() {
     setUiError("");
 
     try {
-      const selectedPath = command === "pick_source_file" ? await pickSourceFile() : await pickSourceFolder();
+      const selectedPath = await withTimeout(
+        command === "pick_source_file" ? pickSourceFile() : pickSourceFolder(),
+        FILE_PICKER_TIMEOUT_MS,
+        "Source picker timed out. Try again or paste a path manually."
+      );
       if (!selectedPath) {
         return;
       }
@@ -615,7 +636,11 @@ function App() {
     setUiError("");
 
     try {
-      const path = await pickCertificateFile();
+      const path = await withTimeout(
+        pickCertificateFile(),
+        FILE_PICKER_TIMEOUT_MS,
+        "Certificate picker timed out. Try again or paste the certificate path manually."
+      );
       if (path) {
         setCertificatePath(path);
       }
@@ -634,7 +659,11 @@ function App() {
     setUiError("");
 
     try {
-      const available = await listRemovableDrives();
+      const available = await withTimeout(
+        listRemovableDrives(),
+        DRIVE_SCAN_TIMEOUT_MS,
+        "Drive scan timed out. Click Refresh and try again."
+      );
       setDrives(available);
 
       if (available.length > 0 && !available.some((drive) => drive.id === selectedDriveId)) {
@@ -660,7 +689,11 @@ function App() {
     setUiError("");
 
     try {
-      const path = await pickLocalDestinationFolder();
+      const path = await withTimeout(
+        pickLocalDestinationFolder(),
+        FILE_PICKER_TIMEOUT_MS,
+        "Destination folder picker timed out. Try again or paste the destination path manually."
+      );
       if (path) {
         setLocalDestinationPath(path);
       }
@@ -678,7 +711,11 @@ function App() {
     setUiError("");
 
     try {
-      const path = await pickReceiveFolder();
+      const path = await withTimeout(
+        pickReceiveFolder(),
+        FILE_PICKER_TIMEOUT_MS,
+        "Receive folder picker timed out. Try again or paste the destination path manually."
+      );
       if (path) {
         setReceiverOutputDir(path);
       }
@@ -1776,8 +1813,4 @@ function App() {
 }
 
 export default App;
-
-
-
-
 

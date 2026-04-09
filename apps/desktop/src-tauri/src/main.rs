@@ -30,6 +30,10 @@ use transfer_core::{
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
 const DEFAULT_SERVER_NAME: &str = "fasttransfer.local";
+#[cfg(target_os = "windows")]
+const DRIVE_QUERY_TIMEOUT: Duration = Duration::from_secs(4);
+#[cfg(target_os = "windows")]
+const FILE_DIALOG_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 struct DesktopState {
@@ -255,41 +259,64 @@ impl StartLocalCopyRequest {
     }
 }
 
-#[tauri::command]
-fn pick_source_file() -> Option<String> {
-    FileDialog::new()
-        .set_title("Choose a file to send")
-        .pick_file()
-        .map(|path| path.display().to_string())
+#[cfg(target_os = "windows")]
+fn run_dialog_with_timeout<F>(open_dialog: F) -> Result<Option<String>, String>
+where
+    F: FnOnce() -> Option<PathBuf> + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let selected = open_dialog().map(|path| path.display().to_string());
+        let _ = sender.send(selected);
+    });
+
+    receiver
+        .recv_timeout(FILE_DIALOG_TIMEOUT)
+        .map_err(|_| "The file dialog timed out. Please try again.".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_dialog_with_timeout<F>(open_dialog: F) -> Result<Option<String>, String>
+where
+    F: FnOnce() -> Option<PathBuf>,
+{
+    Ok(open_dialog().map(|path| path.display().to_string()))
 }
 
 #[tauri::command]
-fn pick_source_folder() -> Option<String> {
-    FileDialog::new()
-        .set_title("Choose a folder to send")
-        .pick_folder()
-        .map(|path| path.display().to_string())
+fn pick_source_file() -> Result<Option<String>, String> {
+    run_dialog_with_timeout(|| FileDialog::new().set_title("Choose a file to send").pick_file())
 }
 
 #[tauri::command]
-fn pick_receive_folder() -> Option<String> {
-    FileDialog::new()
-        .set_title("Choose where received files should be saved")
-        .pick_folder()
-        .map(|path| path.display().to_string())
+fn pick_source_folder() -> Result<Option<String>, String> {
+    run_dialog_with_timeout(|| {
+        FileDialog::new()
+            .set_title("Choose a folder to send")
+            .pick_folder()
+    })
 }
 
 #[tauri::command]
-fn pick_local_destination_folder() -> Option<String> {
-    FileDialog::new()
-        .set_title("Choose destination folder")
-        .pick_folder()
-        .map(|path| path.display().to_string())
+fn pick_receive_folder() -> Result<Option<String>, String> {
+    run_dialog_with_timeout(|| {
+        FileDialog::new()
+            .set_title("Choose where received files should be saved")
+            .pick_folder()
+    })
 }
 
 #[tauri::command]
-fn list_removable_drives() -> Result<Vec<RemovableDrivePayload>, String> {
-    query_removable_drives().map_err(format_error)
+fn pick_local_destination_folder() -> Result<Option<String>, String> {
+    run_dialog_with_timeout(|| FileDialog::new().set_title("Choose destination folder").pick_folder())
+}
+
+#[tauri::command]
+async fn list_removable_drives() -> Result<Vec<RemovableDrivePayload>, String> {
+    tauri::async_runtime::spawn_blocking(query_removable_drives)
+        .await
+        .map_err(|error| format!("Drive query task failed: {error}"))?
+        .map_err(format_error)
 }
 
 #[tauri::command]
@@ -313,12 +340,13 @@ async fn inspect_source(source_path: String) -> Result<PackageSummaryPayload, St
 }
 
 #[tauri::command]
-fn pick_certificate_file() -> Option<String> {
-    FileDialog::new()
-        .add_filter("DER certificate", &["der"])
-        .set_title("Choose receiver certificate")
-        .pick_file()
-        .map(|path| path.display().to_string())
+fn pick_certificate_file() -> Result<Option<String>, String> {
+    run_dialog_with_timeout(|| {
+        FileDialog::new()
+            .add_filter("DER certificate", &["der"])
+            .set_title("Choose receiver certificate")
+            .pick_file()
+    })
 }
 
 #[tauri::command]
@@ -1252,10 +1280,7 @@ fn resolve_volume_for_path(path: &Path) -> Result<Option<VolumeInfo>> {
 #[cfg(target_os = "windows")]
 fn query_logical_disks() -> Result<Vec<LogicalDiskInfo>> {
     let script = "Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,FileSystem,Size,FreeSpace,DriveType | ConvertTo-Json -Compress";
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .context("failed to query logical disks via PowerShell")?;
+    let output = run_powershell_with_timeout(script, DRIVE_QUERY_TIMEOUT)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1290,11 +1315,46 @@ fn query_logical_disks() -> Result<Vec<LogicalDiskInfo>> {
         .collect())
 }
 
+#[cfg(target_os = "windows")]
+fn run_powershell_with_timeout(script: &str, timeout: Duration) -> Result<std::process::Output> {
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to start PowerShell for logical disk query")?;
+
+    let started_at = std::time::Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .context("failed while waiting for PowerShell disk query")?
+        {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .context("failed to capture PowerShell disk query output");
+            }
+            None => {
+                if started_at.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!(
+                        "PowerShell drive query timed out after {}s",
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn query_logical_disks() -> Result<Vec<LogicalDiskInfo>> {
     Ok(Vec::new())
 }
-
 #[cfg(target_os = "windows")]
 fn parse_json_rows(raw: &str) -> Result<Vec<serde_json::Value>> {
     let trimmed = raw.trim();
@@ -1446,5 +1506,4 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
-
 
