@@ -1510,7 +1510,7 @@ function App() {
                 }}
                 disabled={!tauriReady || sendBusy || inspectBusy}
               >
-                {sendBusy ? "Working..." : "Send Package"}
+                {sendBusy ? "Working..." : "Send Files"}
               </button>
             </div>
 
