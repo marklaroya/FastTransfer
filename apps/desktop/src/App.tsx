@@ -836,7 +836,7 @@ function App() {
       <div className="mx-auto grid min-h-screen max-w-[1360px] grid-cols-[290px_1fr] gap-5 p-5">
         <aside className="rounded-2xl border border-border bg-panel p-5 shadow-card">
           <h1 className="text-2xl font-semibold tracking-tight">FastTransfer</h1>
-          <p className="mt-2 text-sm text-muted">Desktop sender/receiver for LAN and local copy workflows.</p>
+          <p className="mt-2 text-sm text-muted">Desktop sender/receiver for LAN and local copy.</p>
 
           <div className="mt-6 rounded-xl border border-border bg-[#f8fbfb] p-3 text-xs text-muted">
             {uiNote}
@@ -881,7 +881,7 @@ function App() {
               <div>
                 <h2 className="text-xl font-semibold">Send</h2>
                 <p className="mt-1 text-sm text-muted">
-                  Choose a destination mode and start transfer. Progress streams live from backend events.
+                  Choose a destination mode and start transfer.
                 </p>
               </div>
               <button
