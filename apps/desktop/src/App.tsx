@@ -17,6 +17,8 @@ import {
   startSend as startSendCommand,
   stopReceiver as stopReceiverCommand,
   stopSend as stopSendCommand,
+  pauseSend as pauseSendCommand,
+  resumeSend as resumeSendCommand,
   type PackageSummary,
   type ReceiverListItem,
   type ReceiverStartPayload,
@@ -187,7 +189,6 @@ function App() {
   const [historyEntries, setHistoryEntries] = useState<TransferHistoryEntry[]>([]);
   const activeSendAttemptRef = useRef<SendAttemptContext | null>(null);
   const lastReceiverTerminalKeyRef = useRef("");
-  const pauseRequestedRef = useRef(false);
 
   function appendHistoryEntry(entry: Omit<TransferHistoryEntry, "id" | "createdAt">) {
     const resolvedEntry: TransferHistoryEntry = {
@@ -300,17 +301,7 @@ function App() {
 
     const setup = async () => {
       unlistenSend = await listenSendStatus((payload) => {
-        const pausedByUser = payload.state === "stopped" && pauseRequestedRef.current;
-        const uiPayload = pausedByUser
-          ? {
-              ...payload,
-              state: "paused",
-              message:
-                "Transfer paused. Press Send Package to continue (resume is best-effort by mode).",
-            }
-          : payload;
-
-        setSendStatus(uiPayload);
+        setSendStatus(payload);
 
         if (
           payload.state === "completed" ||
@@ -331,7 +322,7 @@ function App() {
             appendHistoryEntry({
               direction: "send",
               result,
-              message: uiPayload.message,
+              message: payload.message,
               sourcePath: attempt.sourcePath,
               destinationMode: attempt.destinationMode,
               destinationPath: attempt.destinationPath,
@@ -350,7 +341,6 @@ function App() {
           }
 
           activeSendAttemptRef.current = null;
-          pauseRequestedRef.current = false;
         }
       });
 
@@ -620,7 +610,7 @@ function App() {
       setUiError(`Could not stop receiver: ${asErrorMessage(error)}`);
     }
   }
-  async function controlActiveSend(action: "pause" | "stop") {
+  async function controlActiveSend(action: "pause" | "resume" | "stop") {
     if (!tauriReady) {
       setUiError("Tauri runtime not available.");
       return;
@@ -631,22 +621,24 @@ function App() {
     }
 
     setUiError("");
-    pauseRequestedRef.current = action === "pause";
 
     try {
-      await stopSendCommand();
-      setUiNote(
-        action === "pause"
-          ? "Pause requested. Resume by pressing Send Package."
-          : "Stop requested."
-      );
+      if (action === "pause") {
+        await pauseSendCommand();
+        setUiNote("Transfer paused.");
+      } else if (action === "resume") {
+        await resumeSendCommand();
+        setUiNote("Transfer resumed.");
+      } else {
+        await stopSendCommand();
+        setUiNote("Stop requested.");
+      }
     } catch (error) {
-      pauseRequestedRef.current = false;
-      setUiError(
-        `${action === "pause" ? "Could not pause" : "Could not stop"} transfer: ${asErrorMessage(error)}`
-      );
+      const verb = action === "pause" ? "pause" : action === "resume" ? "resume" : "stop";
+      setUiError(`Could not ${verb} transfer: ${asErrorMessage(error)}`);
     }
   }
+
 
   async function startTransfer() {
     if (!tauriReady) {
@@ -1062,7 +1054,7 @@ function App() {
                   }}
                   disabled={!tauriReady || sendBusy || inspectBusy}
                 >
-                  {sendBusy ? "Working..." : sendStatus.state === "paused" ? "Resume Send" : "Send Package"}
+                  {sendBusy ? "Working..." : "Send Package"}
                 </button>
               </div>
             </div>
@@ -1072,11 +1064,11 @@ function App() {
                 <button
                   className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
                   onClick={() => {
-                    void controlActiveSend("pause");
+                    void controlActiveSend(sendStatus.state === "paused" ? "resume" : "pause");
                   }}
                   disabled={!tauriReady}
                 >
-                  Pause
+                  {sendStatus.state === "paused" ? "Resume" : "Pause"}
                 </button>
                 <button
                   className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-4 py-2 text-sm text-[#b42318]"
@@ -1331,3 +1323,4 @@ function App() {
 }
 
 export default App;
+

@@ -28,16 +28,26 @@ use tokio::{
 
 use crate::{
     configure_reporter, sender_checkpoint_base_dir, ProgressListener, ProgressReporter,
-    ReceivedTransfer, SendRequest, TransferSummary,
+    ReceivedTransfer, SendRequest, TransferControl, TransferSummary,
 };
 
 const BUFFER_SIZE: usize = 256 * 1024;
+
+async fn wait_for_transfer_control(control: Option<&TransferControl>) -> Result<()> {
+    if let Some(control) = control {
+        control.wait_if_paused().await?;
+    }
+
+    Ok(())
+}
 
 pub(crate) async fn send_streaming(
     request: SendRequest,
     progress_listener: Option<ProgressListener>,
     render_terminal: bool,
+    transfer_control: Option<TransferControl>,
 ) -> Result<TransferSummary> {
+    wait_for_transfer_control(transfer_control.as_ref()).await?;
     let source_path = request.source_path.clone();
     let metadata = stdfs::metadata(&source_path)
         .with_context(|| format!("failed to read source metadata for {}", source_path.display()))?;
@@ -101,6 +111,7 @@ pub(crate) async fn send_streaming(
             &mut completed_files,
             &mut total_chunks,
             &mut aggregate_hasher,
+            transfer_control.as_ref(),
         )
         .await?;
     } else {
@@ -119,6 +130,7 @@ pub(crate) async fn send_streaming(
             &mut completed_files,
             &mut total_chunks,
             &mut aggregate_hasher,
+            transfer_control.as_ref(),
         )
         .await?;
     }
@@ -440,6 +452,7 @@ async fn stream_directory(
     completed_files: &mut u64,
     total_chunks: &mut u64,
     aggregate_hasher: &mut Sha256State,
+    transfer_control: Option<&TransferControl>,
 ) -> Result<()> {
     let mut stack = vec![DirectoryFrame {
         entries: read_sorted_entries(source_root)?,
@@ -447,6 +460,7 @@ async fn stream_directory(
     }];
 
     while let Some(frame) = stack.last_mut() {
+        wait_for_transfer_control(transfer_control).await?;
         if frame.index >= frame.entries.len() {
             stack.pop();
             continue;
@@ -495,6 +509,7 @@ async fn stream_directory(
                 completed_files,
                 total_chunks,
                 aggregate_hasher,
+                transfer_control,
             )
             .await?;
         }
@@ -518,7 +533,9 @@ async fn process_file(
     completed_files: &mut u64,
     total_chunks: &mut u64,
     aggregate_hasher: &mut Sha256State,
+    transfer_control: Option<&TransferControl>,
 ) -> Result<()> {
+    wait_for_transfer_control(transfer_control).await?;
     let metadata = stdfs::metadata(source_path)
         .with_context(|| format!("failed to read source metadata for {}", source_path.display()))?;
     if !metadata.is_file() {
@@ -575,6 +592,7 @@ async fn process_file(
             request.parallelism,
             transport,
             reporter,
+            transfer_control,
         )
         .await?;
 
@@ -623,6 +641,7 @@ async fn send_file_chunks(
     parallelism: usize,
     transport: &Arc<QuicSender>,
     reporter: &mut ProgressReporter,
+    transfer_control: Option<&TransferControl>,
 ) -> Result<()> {
     if descriptors.is_empty() {
         return Ok(());
@@ -638,6 +657,7 @@ async fn send_file_chunks(
     let mut current_offset = 0_u64;
 
     for descriptor in descriptors {
+        wait_for_transfer_control(transfer_control).await?;
         let descriptor = descriptor.clone();
         let permit = semaphore
             .clone()
@@ -678,6 +698,7 @@ async fn send_file_chunks(
     }
 
     while let Some(result) = join_set.join_next().await {
+        wait_for_transfer_control(transfer_control).await?;
         let sent_size = result.context("sender chunk task panicked")??;
         reporter.advance(sent_size);
     }
@@ -994,9 +1015,4 @@ fn root_name(source_path: &Path) -> Result<String> {
             )
         })
 }
-
-
-
-
-
 

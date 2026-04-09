@@ -221,6 +221,14 @@ export function stopSend(): Promise<void> {
   return invoke<void>("stop_send");
 }
 
+export function pauseSend(): Promise<void> {
+  return invoke<void>("pause_send");
+}
+
+export function resumeSend(): Promise<void> {
+  return invoke<void>("resume_send");
+}
+
 export function startLocalCopyTransfer(request: StartLocalCopyTransferRequest): Promise<void> {
   return invoke<void>("start_local_copy_transfer", {
     request: {
@@ -246,3 +254,4 @@ export function startSend(request: StartSendRequest): Promise<void> {
     },
   });
 }
+

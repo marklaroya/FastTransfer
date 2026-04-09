@@ -10,7 +10,10 @@ use std::{
     fs as stdfs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -28,13 +31,67 @@ use quic_transport::{
     InMemoryQuicTransport, QuicEndpointConfig, QuicReceiver, QuicSender, DEFAULT_SERVER_NAME,
 };
 use resume::{PersistentResumeState, ResumeState};
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::sync::Notify;
 
 pub use file_io::SourceInspection as TransferSourceSummary;
 pub use progress::ProgressUpdate as TransferProgress;
 pub use local_copy::{LocalCopyRequest, LocalDestinationKind};
 pub const DEFAULT_CHUNK_SIZE: u32 = 4_194_304;
 pub const DEFAULT_PARALLELISM: usize = 8;
+#[derive(Debug, Clone, Default)]
+pub struct TransferControl {
+    inner: Arc<TransferControlInner>,
+}
+
+#[derive(Debug, Default)]
+struct TransferControlInner {
+    paused: AtomicBool,
+    canceled: AtomicBool,
+    wake: Notify,
+}
+
+impl TransferControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pause(&self) {
+        self.inner.paused.store(true, Ordering::SeqCst);
+        self.inner.wake.notify_waiters();
+    }
+
+    pub fn resume(&self) {
+        self.inner.paused.store(false, Ordering::SeqCst);
+        self.inner.wake.notify_waiters();
+    }
+
+    pub fn cancel(&self) {
+        self.inner.canceled.store(true, Ordering::SeqCst);
+        self.inner.wake.notify_waiters();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner.paused.load(Ordering::SeqCst)
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.inner.canceled.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_if_paused(&self) -> Result<()> {
+        loop {
+            if self.is_canceled() {
+                bail!("transfer canceled by user");
+            }
+
+            if !self.is_paused() {
+                return Ok(());
+            }
+
+            self.inner.wake.notified().await;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoTuneProfile {
@@ -212,21 +269,37 @@ impl DestinationSink {
         self,
         progress_listener: Option<ProgressListener>,
         render_terminal: bool,
+        control: Option<TransferControl>,
     ) -> Result<TransferSummary> {
         match self {
-            Self::Lan(sink) => send_file_internal(sink.request, progress_listener, render_terminal).await,
+            Self::Lan(sink) => {
+                send_file_internal(sink.request, progress_listener, render_terminal, control.clone())
+                    .await
+            }
             Self::LocalFolder(sink) => {
-                local_copy::copy_local_streaming(sink.request, progress_listener, render_terminal).await
+                local_copy::copy_local_streaming(
+                    sink.request,
+                    progress_listener,
+                    render_terminal,
+                    control.clone(),
+                )
+                .await
             }
             Self::UsbDrive(sink) => {
-                local_copy::copy_local_streaming(sink.request, progress_listener, render_terminal).await
+                local_copy::copy_local_streaming(
+                    sink.request,
+                    progress_listener,
+                    render_terminal,
+                    control,
+                )
+                .await
             }
         }
     }
 }
 
 pub async fn run_destination_sink(sink: DestinationSink) -> Result<TransferSummary> {
-    sink.run_with_listener(None, true).await
+    sink.run_with_listener(None, true, None).await
 }
 
 pub async fn run_destination_sink_with_progress<F>(
@@ -236,7 +309,19 @@ pub async fn run_destination_sink_with_progress<F>(
 where
     F: Fn(TransferProgress) + Send + Sync + 'static,
 {
-    sink.run_with_listener(Some(Arc::new(on_progress)), false)
+    sink.run_with_listener(Some(Arc::new(on_progress)), false, None)
+        .await
+}
+
+pub async fn run_destination_sink_with_progress_control<F>(
+    sink: DestinationSink,
+    control: TransferControl,
+    on_progress: F,
+) -> Result<TransferSummary>
+where
+    F: Fn(TransferProgress) + Send + Sync + 'static,
+{
+    sink.run_with_listener(Some(Arc::new(on_progress)), false, Some(control))
         .await
 }
 #[derive(Debug, Clone)]
@@ -442,17 +527,17 @@ pub fn bind_receiver(request: ReceiveRequest) -> Result<ReceiverApp> {
 }
 
 pub async fn send_file(request: SendRequest) -> Result<TransferSummary> {
-    send_file_internal(request, None, true).await
+    send_file_internal(request, None, true, None).await
 }
 
 pub async fn send_file_with_progress<F>(request: SendRequest, on_progress: F) -> Result<TransferSummary>
 where
     F: Fn(TransferProgress) + Send + Sync + 'static,
 {
-    send_file_internal(request, Some(Arc::new(on_progress)), false).await
+    send_file_internal(request, Some(Arc::new(on_progress)), false, None).await
 }
 pub async fn copy_to_local(request: LocalCopyRequest) -> Result<TransferSummary> {
-    local_copy::copy_local_streaming(request, None, true).await
+    local_copy::copy_local_streaming(request, None, true, None).await
 }
 
 pub async fn copy_to_local_with_progress<F>(
@@ -462,15 +547,16 @@ pub async fn copy_to_local_with_progress<F>(
 where
     F: Fn(TransferProgress) + Send + Sync + 'static,
 {
-    local_copy::copy_local_streaming(request, Some(Arc::new(on_progress)), false).await
+    local_copy::copy_local_streaming(request, Some(Arc::new(on_progress)), false, None).await
 }
 
 async fn send_file_internal(
     request: SendRequest,
     progress_listener: Option<ProgressListener>,
     render_terminal: bool,
+    control: Option<TransferControl>,
 ) -> Result<TransferSummary> {
-    streaming::send_streaming(request, progress_listener, render_terminal).await
+    streaming::send_streaming(request, progress_listener, render_terminal, control).await
 }
 pub fn build_transfer_plan(
     file_name: impl Into<String>,

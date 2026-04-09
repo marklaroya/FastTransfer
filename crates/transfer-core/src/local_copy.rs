@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     ffi::OsString,
     fs as stdfs,
     path::{Component, Path, PathBuf},
@@ -17,12 +17,21 @@ use crate::{
     configure_reporter,
     progress::ProgressListener,
     ProgressReporter,
+    TransferControl,
     TransferSummary,
     TransferSourceSummary,
 };
 
 const MIN_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
+async fn wait_for_transfer_control(control: Option<&TransferControl>) -> Result<()> {
+    if let Some(control) = control {
+        control.wait_if_paused().await?;
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalDestinationKind {
@@ -52,7 +61,10 @@ pub(crate) async fn copy_local_streaming(
     request: LocalCopyRequest,
     progress_listener: Option<ProgressListener>,
     render_terminal: bool,
+    control: Option<TransferControl>,
 ) -> Result<TransferSummary> {
+    wait_for_transfer_control(control.as_ref()).await?;
+
     let inspection = crate::file_io::inspect_source(request.source_path.as_path())
         .await
         .with_context(|| {
@@ -104,6 +116,7 @@ pub(crate) async fn copy_local_streaming(
                 &mut completed_files,
                 &mut total_chunks,
                 &mut aggregate_hasher,
+                control.as_ref(),
             )
             .await?;
         }
@@ -121,6 +134,7 @@ pub(crate) async fn copy_local_streaming(
                 &mut completed_files,
                 &mut total_chunks,
                 &mut aggregate_hasher,
+                control.as_ref(),
             )
             .await?;
         }
@@ -159,6 +173,7 @@ async fn stream_directory_copy(
     completed_files: &mut u64,
     total_chunks: &mut u64,
     aggregate_hasher: &mut Sha256State,
+    control: Option<&TransferControl>,
 ) -> Result<()> {
     let mut stack = vec![DirectoryFrame {
         entries: read_sorted_entries(source_root)?,
@@ -166,6 +181,8 @@ async fn stream_directory_copy(
     }];
 
     while let Some(frame) = stack.last_mut() {
+        wait_for_transfer_control(control).await?;
+
         if frame.index >= frame.entries.len() {
             stack.pop();
             continue;
@@ -211,6 +228,7 @@ async fn stream_directory_copy(
                 completed_files,
                 total_chunks,
                 aggregate_hasher,
+                control,
             )
             .await?;
         }
@@ -229,7 +247,10 @@ async fn copy_single_file(
     completed_files: &mut u64,
     total_chunks: &mut u64,
     aggregate_hasher: &mut Sha256State,
+    control: Option<&TransferControl>,
 ) -> Result<()> {
+    wait_for_transfer_control(control).await?;
+
     if request.destination_kind == LocalDestinationKind::UsbDrive && !request.destination_dir.exists() {
         bail!(
             "destination drive was removed before copying {}",
@@ -285,6 +306,8 @@ async fn copy_single_file(
     let mut chunk_index = 0_u64;
 
     loop {
+        wait_for_transfer_control(control).await?;
+
         if request.destination_kind == LocalDestinationKind::UsbDrive && !request.destination_dir.exists() {
             bail!("destination drive was removed while copying {}", display_path);
         }
@@ -414,3 +437,4 @@ fn safe_relative_path(relative_path: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
+

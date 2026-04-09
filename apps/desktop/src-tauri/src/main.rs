@@ -21,10 +21,11 @@ use tokio::sync::oneshot;
 use transfer_core::{
     assess_discovered_receiver, bind_receiver, ensure_preferred_receive_dir,
     inspect_transfer_source, prepare_discovered_send_request, preferred_receive_dir_label,
-    recommend_transfer_tuning, run_destination_sink_with_progress,
+    recommend_transfer_tuning, run_destination_sink_with_progress_control,
     DestinationSink, DiscoveredSendRequest, LanSink, LocalCopyRequest, LocalDestinationKind,
     LocalFolderSink, ReceiveRequest, ReceiverTrustReport, ReceiverTrustState, SendRequest,
-    TransferProgress, TransferSummary, UsbDriveSink, DEFAULT_CHUNK_SIZE, DEFAULT_PARALLELISM,
+    TransferControl, TransferProgress, TransferSummary, UsbDriveSink, DEFAULT_CHUNK_SIZE,
+    DEFAULT_PARALLELISM,
 };
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
@@ -35,7 +36,7 @@ struct DesktopState {
     sender_running: Arc<AtomicBool>,
     receiver_running: Arc<AtomicBool>,
     receiver_stop: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    sender_stop: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    sender_control: Arc<Mutex<Option<TransferControl>>>,
     discovered_receivers: Mutex<HashMap<String, NearbyReceiver>>,
 }
 
@@ -577,19 +578,88 @@ fn stop_receiver(state: State<'_, DesktopState>) -> Result<(), String> {
 
 #[tauri::command]
 fn stop_send(state: State<'_, DesktopState>) -> Result<(), String> {
-    let sender = state
-        .sender_stop
+    let control = state
+        .sender_control
         .lock()
-        .map_err(|_| "failed to access the sender stop handle".to_owned())?
-        .take();
+        .map_err(|_| "failed to access the sender control handle".to_owned())?
+        .as_ref()
+        .cloned();
 
-    match sender {
-        Some(sender) => {
-            let _ = sender.send(());
+    match control {
+        Some(control) => {
+            control.cancel();
             Ok(())
         }
         None if state.sender_running.load(Ordering::SeqCst) => {
             Err("Send shutdown is already in progress.".to_owned())
+        }
+        None => Err("No send operation is running.".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn pause_send(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), String> {
+    let control = state
+        .sender_control
+        .lock()
+        .map_err(|_| "failed to access the sender control handle".to_owned())?
+        .as_ref()
+        .cloned();
+
+    match control {
+        Some(control) => {
+            if control.is_paused() {
+                return Ok(());
+            }
+
+            control.pause();
+            emit_send_status(
+                &app,
+                SendStatusPayload {
+                    state: "paused".to_owned(),
+                    message: "Transfer paused. Press Resume to continue.".to_owned(),
+                    progress: None,
+                    summary: None,
+                },
+            );
+            Ok(())
+        }
+        None if state.sender_running.load(Ordering::SeqCst) => {
+            Err("Send control is not ready yet. Try pausing again.".to_owned())
+        }
+        None => Err("No send operation is running.".to_owned()),
+    }
+}
+
+#[tauri::command]
+fn resume_send(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), String> {
+    let control = state
+        .sender_control
+        .lock()
+        .map_err(|_| "failed to access the sender control handle".to_owned())?
+        .as_ref()
+        .cloned();
+
+    match control {
+        Some(control) => {
+            if !control.is_paused() {
+                return Ok(());
+            }
+
+            control.resume();
+            emit_send_status(
+                &app,
+                SendStatusPayload {
+                    state: "sending".to_owned(),
+                    message: "Transfer resumed.".to_owned(),
+                    progress: None,
+                    summary: None,
+                },
+            );
+            Ok(())
+        }
+        None if state.sender_running.load(Ordering::SeqCst) => {
+            Err("Send control is not ready yet. Try resuming again.".to_owned())
         }
         None => Err("No send operation is running.".to_owned()),
     }
@@ -602,7 +672,7 @@ async fn start_local_copy_transfer(
     request: StartLocalCopyRequest,
 ) -> Result<(), String> {
     let running = Arc::clone(&state.sender_running);
-    let stop_handle = Arc::clone(&state.sender_stop);
+    let control_slot = Arc::clone(&state.sender_control);
     if running.swap(true, Ordering::SeqCst) {
         return Err("A send operation is already in progress.".to_owned());
     }
@@ -704,47 +774,38 @@ async fn start_local_copy_transfer(
         }
     };
 
-    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let transfer_control = TransferControl::new();
     {
-        let mut stop_slot = stop_handle
-            .lock()
-            .map_err(|_| "failed to prepare the sender stop handle".to_owned())?;
-        *stop_slot = Some(stop_tx);
+        let mut control_guard = match control_slot.lock() {
+            Ok(control_guard) => control_guard,
+            Err(_) => {
+                running.store(false, Ordering::SeqCst);
+                return Err("failed to prepare sender control handle".to_owned());
+            }
+        };
+        *control_guard = Some(transfer_control.clone());
     }
 
     let app_handle = app.clone();
     let running_for_task = Arc::clone(&running);
-    let stop_handle_for_task = Arc::clone(&stop_handle);
+    let control_slot_for_task = Arc::clone(&control_slot);
     let destination_label = compact_path_label(destination_path.as_path());
-    let destination_label_for_stop = destination_label.clone();
     let source_display = source_path.display().to_string();
 
     tauri::async_runtime::spawn(async move {
-        tokio::select! {
-            _ = &mut stop_rx => {
-                emit_send_status(
-                    &app_handle,
-                    SendStatusPayload {
-                        state: "stopped".to_owned(),
-                        message: format!("Transfer to {} was stopped.", destination_label_for_stop),
-                        progress: None,
-                        summary: None,
-                    },
-                );
-                running_for_task.store(false, Ordering::SeqCst);
-            }
-            _ = run_local_copy_task(
-                &app_handle,
-                sink,
-                &source_display,
-                &destination_label,
-                destination_kind,
-                Arc::clone(&running_for_task),
-            ) => {}
-        }
+        run_local_copy_task(
+            &app_handle,
+            sink,
+            &source_display,
+            &destination_label,
+            destination_kind,
+            Arc::clone(&running_for_task),
+            transfer_control,
+        )
+        .await;
 
-        if let Ok(mut stop_slot) = stop_handle_for_task.lock() {
-            *stop_slot = None;
+        if let Ok(mut control_guard) = control_slot_for_task.lock() {
+            *control_guard = None;
         }
     });
 
@@ -757,7 +818,7 @@ async fn start_send(
     request: SendDesktopRequest,
 ) -> Result<(), String> {
     let running = Arc::clone(&state.sender_running);
-    let stop_handle = Arc::clone(&state.sender_stop);
+    let control_slot = Arc::clone(&state.sender_control);
     if running.swap(true, Ordering::SeqCst) {
         return Err("A send operation is already in progress.".to_owned());
     }
@@ -816,59 +877,51 @@ async fn start_send(
         }
     };
 
-    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let transfer_control = TransferControl::new();
     {
-        let mut stop_slot = stop_handle
-            .lock()
-            .map_err(|_| "failed to prepare the sender stop handle".to_owned())?;
-        *stop_slot = Some(stop_tx);
+        let mut control_guard = match control_slot.lock() {
+            Ok(control_guard) => control_guard,
+            Err(_) => {
+                running.store(false, Ordering::SeqCst);
+                return Err("failed to prepare sender control handle".to_owned());
+            }
+        };
+        *control_guard = Some(transfer_control.clone());
     }
 
-    let stop_handle_for_task = Arc::clone(&stop_handle);
-    let source_path_for_stop = source_path.clone();
+    let control_slot_for_task = Arc::clone(&control_slot);
 
     tauri::async_runtime::spawn(async move {
-        tokio::select! {
-            _ = &mut stop_rx => {
-                emit_send_status(
+        match prepared {
+            PreparedSend::Discovered {
+                send_request,
+                trust_report,
+            } => {
+                run_send_task(
                     &app_handle,
-                    SendStatusPayload {
-                        state: "stopped".to_owned(),
-                        message: format!("Transfer for {} was stopped.", source_path_for_stop),
-                        progress: None,
-                        summary: None,
-                    },
-                );
-                running_for_task.store(false, Ordering::SeqCst);
+                    send_request,
+                    &source_path,
+                    Arc::clone(&running_for_task),
+                    Some(trust_report),
+                    transfer_control,
+                )
+                .await;
             }
-            _ = async {
-                match prepared {
-                    PreparedSend::Discovered { send_request, trust_report } => {
-                        run_send_task(
-                            &app_handle,
-                            send_request,
-                            &source_path,
-                            Arc::clone(&running_for_task),
-                            Some(trust_report),
-                        )
-                        .await;
-                    }
-                    PreparedSend::Manual { send_request } => {
-                        run_send_task(
-                            &app_handle,
-                            send_request,
-                            &source_path,
-                            Arc::clone(&running_for_task),
-                            None,
-                        )
-                        .await;
-                    }
-                }
-            } => {}
+            PreparedSend::Manual { send_request } => {
+                run_send_task(
+                    &app_handle,
+                    send_request,
+                    &source_path,
+                    Arc::clone(&running_for_task),
+                    None,
+                    transfer_control,
+                )
+                .await;
+            }
         }
 
-        if let Ok(mut stop_slot) = stop_handle_for_task.lock() {
-            *stop_slot = None;
+        if let Ok(mut control_guard) = control_slot_for_task.lock() {
+            *control_guard = None;
         }
     });
 
@@ -890,6 +943,7 @@ async fn run_send_task(
     source_path: &str,
     running: Arc<AtomicBool>,
     trust_report: Option<ReceiverTrustReport>,
+    control: TransferControl,
 ) {
     let target_addr = send_request.server_addr.to_string();
     emit_send_status(
@@ -905,7 +959,7 @@ async fn run_send_task(
     let app_for_progress = app_handle.clone();
     let progress_report = trust_report.clone();
     let sink = DestinationSink::Lan(LanSink { request: send_request });
-    let result = run_destination_sink_with_progress(sink, move |progress| {
+    let result = run_destination_sink_with_progress_control(sink, control.clone(), move |progress| {
         let progress_payload: ProgressPayload = progress.into();
         let state = if progress_payload.phase == "scanning" {
             "scanning"
@@ -935,6 +989,15 @@ async fn run_send_task(
                 summary: Some(summary.into()),
             },
         ),
+        Err(_) if control.is_canceled() => emit_send_status(
+            app_handle,
+            SendStatusPayload {
+                state: "stopped".to_owned(),
+                message: format!("Transfer for {} was stopped.", source_path),
+                progress: None,
+                summary: None,
+            },
+        ),
         Err(error) => emit_send_status(
             app_handle,
             SendStatusPayload {
@@ -956,6 +1019,7 @@ async fn run_local_copy_task(
     destination_label: &str,
     destination_kind: DesktopLocalDestinationKind,
     running: Arc<AtomicBool>,
+    control: TransferControl,
 ) {
     emit_send_status(
         app_handle,
@@ -974,7 +1038,7 @@ async fn run_local_copy_task(
     let app_for_progress = app_handle.clone();
     let destination_label_for_progress = destination_label.to_owned();
     let kind_label = destination_kind.as_label().to_owned();
-    let result = run_destination_sink_with_progress(sink, move |progress| {
+    let result = run_destination_sink_with_progress_control(sink, control.clone(), move |progress| {
         let progress_payload: ProgressPayload = progress.into();
         let state = if progress_payload.phase == "scanning" {
             "scanning"
@@ -1011,6 +1075,15 @@ async fn run_local_copy_task(
                 message: format!("Copy to {} completed successfully.", destination_label),
                 progress: None,
                 summary: Some(summary.into()),
+            },
+        ),
+        Err(_) if control.is_canceled() => emit_send_status(
+            app_handle,
+            SendStatusPayload {
+                state: "stopped".to_owned(),
+                message: format!("Transfer to {} was stopped.", destination_label),
+                progress: None,
+                summary: None,
             },
         ),
         Err(error) => emit_send_status(
@@ -1365,10 +1438,13 @@ fn main() {
             start_receiver,
             stop_receiver,
             stop_send,
+            pause_send,
+            resume_send,
             start_send,
             start_local_copy_transfer
         ])
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+
 
