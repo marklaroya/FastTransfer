@@ -88,7 +88,19 @@ impl TransferControl {
                 return Ok(());
             }
 
-            self.inner.wake.notified().await;
+            // Register the waiter before re-checking state so a resume/cancel
+            // signal cannot be missed between the pause check and await.
+            let notified = self.inner.wake.notified();
+
+            if self.is_canceled() {
+                bail!("transfer canceled by user");
+            }
+
+            if !self.is_paused() {
+                continue;
+            }
+
+            notified.await;
         }
     }
 }
@@ -917,4 +929,5 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
+
 
