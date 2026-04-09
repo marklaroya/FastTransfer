@@ -488,7 +488,42 @@ function App() {
     0,
     Math.min(100, receiverStatus.progress?.percent ?? (receiverStatus.state === "completed" ? 100 : 0))
   );
-
+  const sendIsActive =
+    sendBusy && !["completed", "error", "stopped", "idle"].includes(sendStatus.state);
+  const receiverIsActive =
+    receiverBusy && !["completed", "error", "stopped", "idle"].includes(receiverStatus.state);
+  const transferBarState = sendIsActive
+    ? sendPaused
+      ? "paused"
+      : sendStatus.state
+    : receiverIsActive
+    ? receiverStatus.state
+    : "idle";
+  const transferBarTitle = sendIsActive
+    ? "Send in progress"
+    : receiverIsActive
+    ? "Receiver active"
+    : "No active transfer";
+  const transferBarMessage = sendIsActive
+    ? sendStatus.message
+    : receiverIsActive
+    ? receiverStatus.message
+    : "Start sending or start receiver to see live transfer details.";
+  const transferBarPercent = sendIsActive ? sendPercent : receiverIsActive ? receiverPercent : 0;
+  const transferBarMeta = sendIsActive
+    ? sendStatusMeta ??
+      (sendStatus.progress
+        ? `${sendStatus.progress.averageMibPerSec.toFixed(2)} MiB/s`
+        : null)
+    : receiverIsActive && receiverStatus.progress
+    ? `${receiverStatus.progress.averageMibPerSec.toFixed(2)} MiB/s`
+    : null;
+  const transferBarCurrentPath = sendIsActive
+    ? sendStatus.progress?.currentPath
+    : receiverIsActive
+    ? receiverStatus.progress?.currentPath
+    : null;
+  const recentHistoryEntries = historyEntries.slice(0, 3);`r`
   async function inspectSelectedSource(path: string) {
     if (!tauriReady) {
       return;
@@ -886,8 +921,8 @@ function App() {
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
-      <div className="mx-auto grid min-h-screen max-w-[1360px] grid-cols-[290px_1fr] gap-5 p-5">
-        <aside className="rounded-2xl border border-border bg-panel p-5 shadow-card">
+      <div className="mx-auto grid min-h-screen w-full max-w-[1640px] gap-6 p-5 lg:grid-cols-[300px_minmax(0,1fr)] 2xl:max-w-[1720px] 2xl:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="self-start rounded-2xl border border-border bg-panel p-5 shadow-card lg:sticky lg:top-5 lg:max-h-[calc(100vh-2.5rem)] lg:overflow-y-auto">
           <h1 className="text-2xl font-semibold tracking-tight">FastTransfer</h1>
           <p className="mt-2 text-sm text-muted">Desktop sender/receiver for LAN and local copy.</p>
 
@@ -926,10 +961,199 @@ function App() {
             <div className="font-semibold text-ink">Source</div>
             <div className="mt-1 break-all">{sourcePath || "No source selected"}</div>
           </div>
+
+          <section className="mt-6 rounded-xl border border-border bg-white p-4">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
+              <button
+                className="rounded-lg border border-border px-2 py-1 text-[11px] text-muted"
+                onClick={() => {
+                  setServerName(DEFAULT_SERVER_NAME);
+                  setChunkSize("1048576");
+                  setParallelism("4");
+                }}
+                disabled={sendBusy}
+              >
+                Reset
+              </button>
+            </div>
+
+            <label className="mt-3 block text-xs">
+              <div className="mb-1 font-semibold uppercase tracking-wide text-muted">Device Name</div>
+              <input
+                className="w-full rounded-lg border border-border px-3 py-2 text-sm"
+                placeholder="Device Name"
+                value={receiverDeviceName}
+                onChange={(event) => setReceiverDeviceName(event.target.value)}
+              />
+            </label>
+
+            <label className="mt-3 block text-xs">
+              <div className="mb-1 font-semibold uppercase tracking-wide text-muted">Server Name</div>
+              <input
+                className="w-full rounded-lg border border-border px-3 py-2 text-sm"
+                placeholder={DEFAULT_SERVER_NAME}
+                value={serverName}
+                onChange={(event) => setServerName(event.target.value)}
+                disabled={sendBusy}
+              />
+            </label>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <label className="text-xs">
+                <div className="mb-1 font-semibold uppercase tracking-wide text-muted">Chunk</div>
+                <input
+                  className="w-full rounded-lg border border-border px-3 py-2 text-sm"
+                  value={chunkSize}
+                  onChange={(event) => setChunkSize(event.target.value)}
+                  disabled={sendBusy}
+                />
+              </label>
+
+              <label className="text-xs">
+                <div className="mb-1 font-semibold uppercase tracking-wide text-muted">Parallel</div>
+                <input
+                  className="w-full rounded-lg border border-border px-3 py-2 text-sm"
+                  value={parallelism}
+                  onChange={(event) => setParallelism(event.target.value)}
+                  disabled={sendBusy}
+                />
+              </label>
+            </div>
+
+            {sourceSummary ? (
+              <button
+                className="mt-3 w-full rounded-lg border border-border bg-[#f8fbfb] px-3 py-2 text-xs"
+                onClick={() => {
+                  setChunkSize(String(sourceSummary.recommendedChunkSize));
+                  setParallelism(String(sourceSummary.recommendedParallelism));
+                }}
+                disabled={sendBusy}
+              >
+                Use Recommended Tuning
+              </button>
+            ) : null}
+          </section>
+
+          {/* <section className="mt-6 rounded-xl border border-border bg-white p-4 text-xs text-muted">
+            <div className="flex items-center justify-between">
+              <div className="font-semibold uppercase tracking-wide">Recent History</div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded-lg border border-border px-2 py-1 text-[11px]"
+                  onClick={() => {
+                    document.getElementById("history-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }}
+                  disabled={historyEntries.length === 0}
+                >
+                  Open
+                </button>
+                <button
+                  className="rounded-lg border border-border px-2 py-1 text-[11px]"
+                  onClick={clearHistory}
+                  disabled={historyEntries.length === 0}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            {recentHistoryEntries.length === 0 ? (
+              <p className="mt-2">No transfers yet.</p>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {recentHistoryEntries.map((entry) => (
+                  <div key={entry.id} className="rounded-lg border border-border bg-[#f8fbfb] p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-semibold text-ink">
+                        {entry.direction === "send" ? "Send" : "Receive"}
+                      </div>
+                      <span
+                        className={[
+                          "rounded-full px-2 py-1 text-[10px] font-mono",
+                          entry.result === "completed"
+                            ? "bg-accentSoft text-accent"
+                            : entry.result === "stopped"
+                            ? "bg-[#fff4e5] text-[#9a5b00]"
+                            : "bg-[#fde8e8] text-[#b42318]",
+                        ].join(" ")}
+                      >
+                        {entry.result}
+                      </span>
+                    </div>
+                    <div className="mt-1 truncate">{entry.message}</div>
+                    <div className="mt-1 text-[11px]">{new Date(entry.createdAt).toLocaleString()}</div>
+                    {entry.direction === "send" ? (
+                      <button
+                        className="mt-2 rounded-lg border border-border bg-white px-2 py-1 text-[11px]"
+                        onClick={() => applyHistorySettings(entry)}
+                      >
+                        Reuse
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section> */}
         </aside>
 
-        <main className="grid gap-5 grid-rows-[auto_auto_1fr]">
-          <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+        <main className="space-y-5">
+          <section className="sticky top-5 z-20 rounded-2xl border border-border bg-panel/95 p-4 shadow-card backdrop-blur">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">{transferBarTitle}</div>
+                <div className="text-xs text-muted">{transferBarMessage}</div>
+              </div>
+              <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(transferBarState)}`}>
+                {transferBarState}
+              </span>
+            </div>
+
+            <div className="mt-3 h-2 w-full rounded-full bg-[#e7efef]">
+              <div
+                className={[
+                  "h-2 rounded-full transition-all duration-200",
+                  sendPaused && sendIsActive ? "bg-[#d99a12]" : "bg-accent",
+                ].join(" ")}
+                style={{ width: `${transferBarPercent.toFixed(2)}%` }}
+              />
+            </div>
+
+            <div className="mt-2 flex items-center justify-between text-xs text-muted">
+              <span>{transferBarPercent.toFixed(2)}%</span>
+              {transferBarMeta ? <span>{transferBarMeta}</span> : null}
+            </div>
+
+            {transferBarCurrentPath ? (
+              <div className="mt-1 truncate text-xs text-muted">Current: {transferBarCurrentPath}</div>
+            ) : null}
+
+            {sendIsActive ? (
+              <div className="mt-3 flex gap-2">
+                <button
+                  className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                  onClick={() => {
+                    void controlActiveSend(sendPaused ? "resume" : "pause");
+                  }}
+                  disabled={!tauriReady}
+                >
+                  {sendPaused ? "Resume" : "Pause"}
+                </button>
+                <button
+                  className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-3 py-1 text-xs text-[#b42318]"
+                  onClick={() => {
+                    void controlActiveSend("stop");
+                  }}
+                  disabled={!tauriReady}
+                >
+                  Stop
+                </button>
+              </div>
+            ) : null}
+          </section>
+          <div className="space-y-5">
+            <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-xl font-semibold">Send</h2>
@@ -1237,7 +1461,7 @@ function App() {
             ) : null}
           </section>
 
-          <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+          <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-xl font-semibold">Receive</h2>
@@ -1382,7 +1606,7 @@ function App() {
             </article>
           </section>
 
-          <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
+          <section id="history-section" className="rounded-2xl border border-border bg-panel p-6 shadow-card">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">History</h3>
               <button
@@ -1451,6 +1675,7 @@ function App() {
               </div>
             )}
           </section>
+          </div>
         </main>
       </div>
     </div>
@@ -1458,5 +1683,7 @@ function App() {
 }
 
 export default App;
+
+
 
 
