@@ -188,7 +188,14 @@ function App() {
 
   const [historyEntries, setHistoryEntries] = useState<TransferHistoryEntry[]>([]);
   const activeSendAttemptRef = useRef<SendAttemptContext | null>(null);
+  const sendPausedRef = useRef(false);
+  const [sendPaused, setSendPaused] = useState(false);
   const lastReceiverTerminalKeyRef = useRef("");
+
+  function updateSendPaused(value: boolean) {
+    sendPausedRef.current = value;
+    setSendPaused(value);
+  }
 
   function appendHistoryEntry(entry: Omit<TransferHistoryEntry, "id" | "createdAt">) {
     const resolvedEntry: TransferHistoryEntry = {
@@ -301,6 +308,23 @@ function App() {
 
     const setup = async () => {
       unlistenSend = await listenSendStatus((payload) => {
+        const activeProgressStates = new Set(["starting", "scanning", "sending"]);
+        const terminalStates = new Set(["completed", "error", "stopped", "idle"]);
+
+        if (payload.state === "paused") {
+          updateSendPaused(true);
+          setSendStatus(payload);
+          return;
+        }
+
+        if (sendPausedRef.current && activeProgressStates.has(payload.state)) {
+          return;
+        }
+
+        if (terminalStates.has(payload.state)) {
+          updateSendPaused(false);
+        }
+
         setSendStatus(payload);
 
         if (
@@ -622,18 +646,37 @@ function App() {
 
     setUiError("");
 
+    const pausedBeforeAction = sendPausedRef.current;
+
     try {
       if (action === "pause") {
         await pauseSendCommand();
+        updateSendPaused(true);
+        setSendStatus((previous) => ({
+          ...previous,
+          state: "paused",
+          message: "Transfer paused. Press Resume to continue.",
+        }));
         setUiNote("Transfer paused.");
       } else if (action === "resume") {
         await resumeSendCommand();
+        updateSendPaused(false);
+        setSendStatus((previous) => ({
+          ...previous,
+          state: "sending",
+          message: "Transfer resumed.",
+        }));
         setUiNote("Transfer resumed.");
       } else {
         await stopSendCommand();
+        updateSendPaused(false);
         setUiNote("Stop requested.");
       }
     } catch (error) {
+      if (action === "resume") {
+        updateSendPaused(pausedBeforeAction);
+      }
+
       const verb = action === "pause" ? "pause" : action === "resume" ? "resume" : "stop";
       setUiError(`Could not ${verb} transfer: ${asErrorMessage(error)}`);
     }
@@ -660,6 +703,7 @@ function App() {
       return;
     }
 
+    updateSendPaused(false);
     setSendBusy(true);
     setUiError("");
 
@@ -1064,11 +1108,11 @@ function App() {
                 <button
                   className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
                   onClick={() => {
-                    void controlActiveSend(sendStatus.state === "paused" ? "resume" : "pause");
+                    void controlActiveSend(sendPaused ? "resume" : "pause");
                   }}
                   disabled={!tauriReady}
                 >
-                  {sendStatus.state === "paused" ? "Resume" : "Pause"}
+                  {sendPaused ? "Resume" : "Pause"}
                 </button>
                 <button
                   className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-4 py-2 text-sm text-[#b42318]"
@@ -1323,4 +1367,5 @@ function App() {
 }
 
 export default App;
+
 
