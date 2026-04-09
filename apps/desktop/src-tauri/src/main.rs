@@ -35,6 +35,7 @@ struct DesktopState {
     sender_running: Arc<AtomicBool>,
     receiver_running: Arc<AtomicBool>,
     receiver_stop: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    sender_stop: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     discovered_receivers: Mutex<HashMap<String, NearbyReceiver>>,
 }
 
@@ -575,12 +576,33 @@ fn stop_receiver(state: State<'_, DesktopState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn stop_send(state: State<'_, DesktopState>) -> Result<(), String> {
+    let sender = state
+        .sender_stop
+        .lock()
+        .map_err(|_| "failed to access the sender stop handle".to_owned())?
+        .take();
+
+    match sender {
+        Some(sender) => {
+            let _ = sender.send(());
+            Ok(())
+        }
+        None if state.sender_running.load(Ordering::SeqCst) => {
+            Err("Send shutdown is already in progress.".to_owned())
+        }
+        None => Err("No send operation is running.".to_owned()),
+    }
+}
+
+#[tauri::command]
 async fn start_local_copy_transfer(
     app: AppHandle,
     state: State<'_, DesktopState>,
     request: StartLocalCopyRequest,
 ) -> Result<(), String> {
     let running = Arc::clone(&state.sender_running);
+    let stop_handle = Arc::clone(&state.sender_stop);
     if running.swap(true, Ordering::SeqCst) {
         return Err("A send operation is already in progress.".to_owned());
     }
@@ -672,8 +694,6 @@ async fn start_local_copy_transfer(
         destination_kind.as_label()
     );
 
-    // Route the same transfer pipeline through a destination sink so LAN and local targets
-    // share progress reporting and orchestration behavior.
     let local_request = request.into_local_copy_request();
     let sink = match destination_kind {
         DesktopLocalDestinationKind::LocalFolder => {
@@ -684,26 +704,52 @@ async fn start_local_copy_transfer(
         }
     };
 
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    {
+        let mut stop_slot = stop_handle
+            .lock()
+            .map_err(|_| "failed to prepare the sender stop handle".to_owned())?;
+        *stop_slot = Some(stop_tx);
+    }
+
     let app_handle = app.clone();
     let running_for_task = Arc::clone(&running);
+    let stop_handle_for_task = Arc::clone(&stop_handle);
     let destination_label = compact_path_label(destination_path.as_path());
+    let destination_label_for_stop = destination_label.clone();
     let source_display = source_path.display().to_string();
 
     tauri::async_runtime::spawn(async move {
-        run_local_copy_task(
-            &app_handle,
-            sink,
-            &source_display,
-            &destination_label,
-            destination_kind,
-            running_for_task,
-        )
-        .await;
+        tokio::select! {
+            _ = &mut stop_rx => {
+                emit_send_status(
+                    &app_handle,
+                    SendStatusPayload {
+                        state: "stopped".to_owned(),
+                        message: format!("Transfer to {} was stopped.", destination_label_for_stop),
+                        progress: None,
+                        summary: None,
+                    },
+                );
+                running_for_task.store(false, Ordering::SeqCst);
+            }
+            _ = run_local_copy_task(
+                &app_handle,
+                sink,
+                &source_display,
+                &destination_label,
+                destination_kind,
+                Arc::clone(&running_for_task),
+            ) => {}
+        }
+
+        if let Ok(mut stop_slot) = stop_handle_for_task.lock() {
+            *stop_slot = None;
+        }
     });
 
     Ok(())
 }
-
 #[tauri::command]
 async fn start_send(
     app: AppHandle,
@@ -711,6 +757,7 @@ async fn start_send(
     request: SendDesktopRequest,
 ) -> Result<(), String> {
     let running = Arc::clone(&state.sender_running);
+    let stop_handle = Arc::clone(&state.sender_stop);
     if running.swap(true, Ordering::SeqCst) {
         return Err("A send operation is already in progress.".to_owned());
     }
@@ -718,63 +765,115 @@ async fn start_send(
     let app_handle = app.clone();
     let running_for_task = Arc::clone(&running);
     let source_path = request.source_path.clone();
-    let selected_peer_id = request.selected_peer_id.clone().filter(|value| !value.trim().is_empty());
+    let selected_peer_id = request
+        .selected_peer_id
+        .clone()
+        .filter(|value| !value.trim().is_empty());
 
-    let prepared = if let Some(peer_id) = selected_peer_id {
-        let receiver = state
-            .discovered_receivers
-            .lock()
-            .map_err(|_| "failed to access the discovered receiver cache".to_owned())?
-            .get(&peer_id)
-            .cloned()
-            .with_context(|| format!("receiver {peer_id} is no longer in the discovery cache; refresh nearby devices"))
-            .map_err(format_error)?;
-        let trust_dir = trust_cache_dir().map_err(format_error)?;
-        let (send_request, trust_report) = prepare_discovered_send_request(DiscoveredSendRequest {
-            receiver,
-            source_path: PathBuf::from(&request.source_path),
-            trust_cache_dir: trust_dir,
-            server_addr: None,
-            server_name: request.server_name.clone().unwrap_or_else(|| DEFAULT_SERVER_NAME.to_owned()),
-            chunk_size: request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
-            parallelism: request.parallelism.unwrap_or(DEFAULT_PARALLELISM).max(1),
-        })
-        .map_err(format_error)?;
-        PreparedSend::Discovered { send_request, trust_report }
-    } else {
-        PreparedSend::Manual {
-            send_request: request.into_manual_transfer_request().map_err(format_error)?,
+    let prepared = match (|| -> Result<PreparedSend, String> {
+        if let Some(peer_id) = selected_peer_id {
+            let receiver = state
+                .discovered_receivers
+                .lock()
+                .map_err(|_| "failed to access the discovered receiver cache".to_owned())?
+                .get(&peer_id)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "receiver {peer_id} is no longer in the discovery cache; refresh nearby devices"
+                    )
+                })
+                .map_err(format_error)?;
+            let trust_dir = trust_cache_dir().map_err(format_error)?;
+            let (send_request, trust_report) =
+                prepare_discovered_send_request(DiscoveredSendRequest {
+                    receiver,
+                    source_path: PathBuf::from(&request.source_path),
+                    trust_cache_dir: trust_dir,
+                    server_addr: None,
+                    server_name: request
+                        .server_name
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_SERVER_NAME.to_owned()),
+                    chunk_size: request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1),
+                    parallelism: request.parallelism.unwrap_or(DEFAULT_PARALLELISM).max(1),
+                })
+                .map_err(format_error)?;
+            Ok(PreparedSend::Discovered {
+                send_request,
+                trust_report,
+            })
+        } else {
+            Ok(PreparedSend::Manual {
+                send_request: request.into_manual_transfer_request().map_err(format_error)?,
+            })
+        }
+    })() {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            running.store(false, Ordering::SeqCst);
+            return Err(error);
         }
     };
 
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    {
+        let mut stop_slot = stop_handle
+            .lock()
+            .map_err(|_| "failed to prepare the sender stop handle".to_owned())?;
+        *stop_slot = Some(stop_tx);
+    }
+
+    let stop_handle_for_task = Arc::clone(&stop_handle);
+    let source_path_for_stop = source_path.clone();
+
     tauri::async_runtime::spawn(async move {
-        match prepared {
-            PreparedSend::Discovered { send_request, trust_report } => {
-                run_send_task(
+        tokio::select! {
+            _ = &mut stop_rx => {
+                emit_send_status(
                     &app_handle,
-                    send_request,
-                    &source_path,
-                    Arc::clone(&running_for_task),
-                    Some(trust_report),
-                )
-                .await;
+                    SendStatusPayload {
+                        state: "stopped".to_owned(),
+                        message: format!("Transfer for {} was stopped.", source_path_for_stop),
+                        progress: None,
+                        summary: None,
+                    },
+                );
+                running_for_task.store(false, Ordering::SeqCst);
             }
-            PreparedSend::Manual { send_request } => {
-                run_send_task(
-                    &app_handle,
-                    send_request,
-                    &source_path,
-                    Arc::clone(&running_for_task),
-                    None,
-                )
-                .await;
-            }
+            _ = async {
+                match prepared {
+                    PreparedSend::Discovered { send_request, trust_report } => {
+                        run_send_task(
+                            &app_handle,
+                            send_request,
+                            &source_path,
+                            Arc::clone(&running_for_task),
+                            Some(trust_report),
+                        )
+                        .await;
+                    }
+                    PreparedSend::Manual { send_request } => {
+                        run_send_task(
+                            &app_handle,
+                            send_request,
+                            &source_path,
+                            Arc::clone(&running_for_task),
+                            None,
+                        )
+                        .await;
+                    }
+                }
+            } => {}
+        }
+
+        if let Ok(mut stop_slot) = stop_handle_for_task.lock() {
+            *stop_slot = None;
         }
     });
 
     Ok(())
 }
-
 enum PreparedSend {
     Discovered {
         send_request: SendRequest,
