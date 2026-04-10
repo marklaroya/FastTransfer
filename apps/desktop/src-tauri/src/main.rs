@@ -519,50 +519,75 @@ async fn start_receiver(
                 },
             );
 
-            let app_for_progress = app_handle.clone();
             let cert_path_for_progress = request_for_task.cert_path.display().to_string();
             let bind_addr_for_progress = ready.bind_addr.to_string();
             let output_dir_for_progress = output_dir_for_task.display().to_string();
             let output_dir_label_for_progress = output_dir_label_for_task.clone();
-            let received = receiver
-                .receive_once_with_progress(move |progress| {
-                    emit_receiver_status(
-                        &app_for_progress,
-                        ReceiverStatusPayload {
-                            state: "receiving".to_owned(),
-                            message: progress.label.clone(),
-                            bind_addr: Some(bind_addr_for_progress.clone()),
-                            output_dir: Some(output_dir_for_progress.clone()),
-                            output_dir_label: Some(output_dir_label_for_progress.clone()),
-                            progress: Some(progress.into()),
-                            summary: None,
-                            saved_path: None,
-                            saved_path_label: None,
-                            remote_address: None,
-                            certificate_path: Some(cert_path_for_progress.clone()),
-                        },
-                    );
-                })
-                .await?;
 
-            emit_receiver_status(
-                &app_handle,
-                ReceiverStatusPayload {
-                    state: "completed".to_owned(),
-                    message: format!("Saved {} from {}.", received.summary.file_name, received.remote_address),
-                    bind_addr: Some(ready.bind_addr.to_string()),
-                    output_dir: Some(output_dir_for_task.display().to_string()),
-                    output_dir_label: Some(output_dir_label_for_task.clone()),
-                    progress: None,
-                    summary: Some(received.summary.into()),
-                    saved_path: Some(received.saved_path.display().to_string()),
-                    saved_path_label: Some(preferred_receive_dir_label(&received.saved_path)),
-                    remote_address: Some(received.remote_address.to_string()),
-                    certificate_path: Some(ready.cert_path.display().to_string()),
-                },
-            );
+            loop {
+                let app_for_progress = app_handle.clone();
+                let bind_addr_for_callback = bind_addr_for_progress.clone();
+                let output_dir_for_callback = output_dir_for_progress.clone();
+                let output_dir_label_for_callback = output_dir_label_for_progress.clone();
+                let cert_path_for_callback = cert_path_for_progress.clone();
+                let received = receiver
+                    .receive_once_with_progress(move |progress| {
+                        emit_receiver_status(
+                            &app_for_progress,
+                            ReceiverStatusPayload {
+                                state: "receiving".to_owned(),
+                                message: progress.label.clone(),
+                                bind_addr: Some(bind_addr_for_callback.clone()),
+                                output_dir: Some(output_dir_for_callback.clone()),
+                                output_dir_label: Some(output_dir_label_for_callback.clone()),
+                                progress: Some(progress.into()),
+                                summary: None,
+                                saved_path: None,
+                                saved_path_label: None,
+                                remote_address: None,
+                                certificate_path: Some(cert_path_for_callback.clone()),
+                            },
+                        );
+                    })
+                    .await?;
 
-            Ok::<(), anyhow::Error>(())
+                emit_receiver_status(
+                    &app_handle,
+                    ReceiverStatusPayload {
+                        state: "completed".to_owned(),
+                        message: format!("Saved {} from {}.", received.summary.file_name, received.remote_address),
+                        bind_addr: Some(ready.bind_addr.to_string()),
+                        output_dir: Some(output_dir_for_task.display().to_string()),
+                        output_dir_label: Some(output_dir_label_for_task.clone()),
+                        progress: None,
+                        summary: Some(received.summary.into()),
+                        saved_path: Some(received.saved_path.display().to_string()),
+                        saved_path_label: Some(preferred_receive_dir_label(&received.saved_path)),
+                        remote_address: Some(received.remote_address.to_string()),
+                        certificate_path: Some(ready.cert_path.display().to_string()),
+                    },
+                );
+
+                emit_receiver_status(
+                    &app_handle,
+                    ReceiverStatusPayload {
+                        state: "listening".to_owned(),
+                        message: format!(
+                            "Waiting for the next transfer on {} as {}. Incoming files go to {}.",
+                            ready.bind_addr, advertised_name_for_task, output_dir_label_for_task
+                        ),
+                        bind_addr: Some(ready.bind_addr.to_string()),
+                        output_dir: Some(output_dir_for_task.display().to_string()),
+                        output_dir_label: Some(output_dir_label_for_task.clone()),
+                        progress: None,
+                        summary: None,
+                        saved_path: None,
+                        saved_path_label: None,
+                        remote_address: None,
+                        certificate_path: Some(ready.cert_path.display().to_string()),
+                    },
+                );
+            }
         };
 
         let result = tokio::select! {
@@ -856,6 +881,7 @@ async fn start_local_copy_transfer(
     let control_slot_for_task = Arc::clone(&control_slot);
     let destination_label = compact_path_label(destination_path.as_path());
     let source_display = source_path.display().to_string();
+    let transfer_control_for_cleanup = transfer_control.clone();
 
     tauri::async_runtime::spawn(async move {
         run_local_copy_task(
@@ -869,9 +895,7 @@ async fn start_local_copy_transfer(
         )
         .await;
 
-        if let Ok(mut control_guard) = control_slot_for_task.lock() {
-            *control_guard = None;
-        }
+        clear_sender_control_if_matches(&control_slot_for_task, &transfer_control_for_cleanup);
     });
 
     Ok(())
@@ -955,6 +979,7 @@ async fn start_send(
     }
 
     let control_slot_for_task = Arc::clone(&control_slot);
+    let transfer_control_for_cleanup = transfer_control.clone();
 
     tauri::async_runtime::spawn(async move {
         match prepared {
@@ -985,9 +1010,7 @@ async fn start_send(
             }
         }
 
-        if let Ok(mut control_guard) = control_slot_for_task.lock() {
-            *control_guard = None;
-        }
+        clear_sender_control_if_matches(&control_slot_for_task, &transfer_control_for_cleanup);
     });
 
     Ok(())
@@ -1000,6 +1023,20 @@ enum PreparedSend {
     Manual {
         send_request: SendRequest,
     },
+}
+
+fn clear_sender_control_if_matches(
+    control_slot: &Arc<Mutex<Option<TransferControl>>>,
+    control: &TransferControl,
+) {
+    if let Ok(mut guard) = control_slot.lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|active| active.same_instance(control))
+        {
+            *guard = None;
+        }
+    }
 }
 
 async fn run_send_task(
@@ -1044,37 +1081,29 @@ async fn run_send_task(
     })
     .await;
 
-    match result {
-        Ok(summary) => emit_send_status(
-            app_handle,
-            SendStatusPayload {
-                state: "completed".to_owned(),
-                message: send_success_message(&target_addr, trust_report.as_ref()),
-                progress: None,
-                summary: Some(summary.into()),
-            },
-        ),
-        Err(_) if control.is_canceled() => emit_send_status(
-            app_handle,
-            SendStatusPayload {
-                state: "stopped".to_owned(),
-                message: format!("Transfer for {} was stopped.", source_path),
-                progress: None,
-                summary: None,
-            },
-        ),
-        Err(error) => emit_send_status(
-            app_handle,
-            SendStatusPayload {
-                state: "error".to_owned(),
-                message: format!("Failed to send {source_path}: {error:#}"),
-                progress: None,
-                summary: None,
-            },
-        ),
-    }
+    let payload = match result {
+        Ok(summary) => SendStatusPayload {
+            state: "completed".to_owned(),
+            message: send_success_message(&target_addr, trust_report.as_ref()),
+            progress: None,
+            summary: Some(summary.into()),
+        },
+        Err(_) if control.is_canceled() => SendStatusPayload {
+            state: "stopped".to_owned(),
+            message: format!("Transfer for {} was stopped.", source_path),
+            progress: None,
+            summary: None,
+        },
+        Err(error) => SendStatusPayload {
+            state: "error".to_owned(),
+            message: format!("Failed to send {source_path}: {error:#}"),
+            progress: None,
+            summary: None,
+        },
+    };
 
     running.store(false, Ordering::SeqCst);
+    emit_send_status(app_handle, payload);
 }
 
 async fn run_local_copy_task(
@@ -1132,37 +1161,29 @@ async fn run_local_copy_task(
     })
     .await;
 
-    match result {
-        Ok(summary) => emit_send_status(
-            app_handle,
-            SendStatusPayload {
-                state: "completed".to_owned(),
-                message: format!("Copy to {} completed successfully.", destination_label),
-                progress: None,
-                summary: Some(summary.into()),
-            },
-        ),
-        Err(_) if control.is_canceled() => emit_send_status(
-            app_handle,
-            SendStatusPayload {
-                state: "stopped".to_owned(),
-                message: format!("Transfer to {} was stopped.", destination_label),
-                progress: None,
-                summary: None,
-            },
-        ),
-        Err(error) => emit_send_status(
-            app_handle,
-            SendStatusPayload {
-                state: "error".to_owned(),
-                message: format!("Failed to copy {source_path} to {destination_label}: {error:#}"),
-                progress: None,
-                summary: None,
-            },
-        ),
-    }
+    let payload = match result {
+        Ok(summary) => SendStatusPayload {
+            state: "completed".to_owned(),
+            message: format!("Copy to {} completed successfully.", destination_label),
+            progress: None,
+            summary: Some(summary.into()),
+        },
+        Err(_) if control.is_canceled() => SendStatusPayload {
+            state: "stopped".to_owned(),
+            message: format!("Transfer to {} was stopped.", destination_label),
+            progress: None,
+            summary: None,
+        },
+        Err(error) => SendStatusPayload {
+            state: "error".to_owned(),
+            message: format!("Failed to copy {source_path} to {destination_label}: {error:#}"),
+            progress: None,
+            summary: None,
+        },
+    };
 
     running.store(false, Ordering::SeqCst);
+    emit_send_status(app_handle, payload);
 }
 
 fn send_start_message(target_addr: &str, trust_report: Option<&ReceiverTrustReport>) -> String {
@@ -1544,4 +1565,5 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+
 

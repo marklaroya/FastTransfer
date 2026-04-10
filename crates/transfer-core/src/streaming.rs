@@ -183,7 +183,7 @@ pub(crate) async fn send_streaming(
 
 pub(crate) async fn receive_streaming(
     output_dir: PathBuf,
-    transport: QuicReceiver,
+    transport: &QuicReceiver,
     progress_listener: Option<ProgressListener>,
     render_terminal: bool,
 ) -> Result<ReceivedTransfer> {

@@ -45,6 +45,33 @@ const WORKSPACE_TABS: Array<{ key: WorkspaceTab; label: string }> = [
   { key: "history", label: "History" },
   { key: "settings", label: "Settings" },
 ];
+const WORKSPACE_CONTEXT: Record<
+  WorkspaceTab,
+  { subtitle: string; hint: string }
+> = {
+  send: {
+    subtitle: "Prepare outgoing transfers and choose how files are sent.",
+    hint: "Tip: choose a destination mode first, then review source and send.",
+  },
+  receive: {
+    subtitle: "Accept incoming transfers and monitor receiver health.",
+    hint: "Tip: keep receiver running when you expect repeated sends.",
+  },
+  history: {
+    subtitle: "Review completed, stopped, and failed transfers.",
+    hint: "Tip: use Reuse Settings on a send entry to restart quickly.",
+  },
+  settings: {
+    subtitle: "Manage defaults for transfer behavior and receiver identity.",
+    hint: "Tip: set defaults once, then stay in Send for daily use.",
+  },
+};
+const DESTINATION_MODE_HINTS: Record<DestinationMode, string> = {
+  nearby: "Best for LAN transfers between trusted devices.",
+  manual: "Use direct address + certificate for explicit targeting.",
+  usb: "Copy to removable drives and external storage.",
+  local: "Copy to folders on this computer.",
+};
 
 type TransferDirection = "send" | "receive";
 type TransferResult = "completed" | "error" | "stopped";
@@ -99,6 +126,8 @@ const HISTORY_STORAGE_KEY = "fasttransfer.desktop.history.v1";
 const MAX_HISTORY_ENTRIES = 40;
 const DRIVE_SCAN_TIMEOUT_MS = 6000;
 const FILE_PICKER_TIMEOUT_MS = 20000;
+const SEND_START_RETRY_ATTEMPTS = 10;
+const SEND_START_RETRY_DELAY_MS = 120;
 
 function asErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
@@ -146,6 +175,33 @@ async function withTimeout<T>(
   });
 }
 
+function isSenderBusyError(error: unknown): boolean {
+  return asErrorMessage(error).toLowerCase().includes("already in progress");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function invokeWithSendStartRetry<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < SEND_START_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isSenderBusyError(error) || attempt + 1 >= SEND_START_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(SEND_START_RETRY_DELAY_MS);
+    }
+  }
+
+  throw lastError ?? new Error("Could not start transfer.");
+}
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
     return "0 B";
@@ -261,6 +317,8 @@ function App() {
   const batchSendPlanRef = useRef<BatchSendPlan | null>(null);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const lastReceiverTerminalKeyRef = useRef("");
+  const workspaceTopRef = useRef<HTMLDivElement | null>(null);
+  const didMountWorkspaceRef = useRef(false);
 
   function updateSendPaused(value: boolean) {
     sendPausedRef.current = value;
@@ -369,6 +427,18 @@ function App() {
   }, [historyEntries]);
 
   useEffect(() => {
+    if (!didMountWorkspaceRef.current) {
+      didMountWorkspaceRef.current = true;
+      return;
+    }
+
+    workspaceTopRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, [activeWorkspace]);
+
+  useEffect(() => {
     if (!tauriReady) {
       return;
     }
@@ -469,7 +539,11 @@ function App() {
       unlistenReceiver = await listenReceiverStatus((payload) => {
         setReceiverStatus(payload);
 
+        const activeStates = new Set(["starting", "listening", "receiving"]);
         const terminalStates = new Set(["completed", "error", "stopped", "idle"]);
+        if (activeStates.has(payload.state)) {
+          setReceiverBusy(true);
+        }
         if (terminalStates.has(payload.state)) {
           setReceiverBusy(false);
         }
@@ -517,6 +591,11 @@ function App() {
 
   const selectedReceiver = receivers.find((item) => item.peerId === selectedPeerId) ?? null;
   const selectedDrive = drives.find((item) => item.id === selectedDriveId) ?? null;
+  const activeWorkspaceLabel =
+    WORKSPACE_TABS.find((workspace) => workspace.key === activeWorkspace)?.label ?? "Send";
+  const activeWorkspaceContext = WORKSPACE_CONTEXT[activeWorkspace];
+  const activeDestinationLabel =
+    DESTINATION_MODES.find((mode) => mode.key === destinationMode)?.label ?? "Nearby Device";
   const filteredReceivers = useMemo(() => {
     const query = receiverQuery.trim().toLowerCase();
     if (!query) {
@@ -959,13 +1038,15 @@ function App() {
         destinationPath,
       };
 
-      await startLocalCopyTransfer({
-        sourcePath: source,
-        destinationPath,
-        destinationKind: plan.destinationMode === "usb" ? "usb_drive" : "local_folder",
-        chunkSize: plan.chunkSize,
-        parallelism: plan.parallelism,
-      });
+      await invokeWithSendStartRetry(() =>
+        startLocalCopyTransfer({
+          sourcePath: source,
+          destinationPath,
+          destinationKind: plan.destinationMode === "usb" ? "usb_drive" : "local_folder",
+          chunkSize: plan.chunkSize,
+          parallelism: plan.parallelism,
+        })
+      );
 
       setSendStatus({
         state: "starting",
@@ -983,13 +1064,15 @@ function App() {
         selectedPeerId: peerId,
       };
 
-      await startSendCommand({
-        sourcePath: source,
-        selectedPeerId: peerId,
-        serverName: plan.serverName,
-        chunkSize: plan.chunkSize,
-        parallelism: plan.parallelism,
-      });
+      await invokeWithSendStartRetry(() =>
+        startSendCommand({
+          sourcePath: source,
+          selectedPeerId: peerId,
+          serverName: plan.serverName,
+          chunkSize: plan.chunkSize,
+          parallelism: plan.parallelism,
+        })
+      );
 
       setSendStatus({
         state: "starting",
@@ -1008,14 +1091,16 @@ function App() {
       certificatePath: manualCertificate,
     };
 
-    await startSendCommand({
-      sourcePath: source,
-      targetAddr: manualAddress,
-      certificatePath: manualCertificate,
-      serverName: plan.serverName,
-      chunkSize: plan.chunkSize,
-      parallelism: plan.parallelism,
-    });
+    await invokeWithSendStartRetry(() =>
+      startSendCommand({
+        sourcePath: source,
+        targetAddr: manualAddress,
+        certificatePath: manualCertificate,
+        serverName: plan.serverName,
+        chunkSize: plan.chunkSize,
+        parallelism: plan.parallelism,
+      })
+    );
 
     setSendStatus({
       state: "starting",
@@ -1442,21 +1527,84 @@ function App() {
             </div>
           </section>
 
+          <section ref={workspaceTopRef} className="rounded-2xl border border-border bg-panel p-4 shadow-card">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">You Are Here</div>
+                <div className="mt-1 text-lg font-semibold text-ink">{activeWorkspaceLabel}</div>
+                <p className="mt-1 text-sm text-muted">{activeWorkspaceContext.subtitle}</p>
+                {activeWorkspace === "send" ? (
+                  <p className="mt-2 text-xs text-muted">
+                    Current mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> · {DESTINATION_MODE_HINTS[destinationMode]}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-muted">{activeWorkspaceContext.hint}</p>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {activeWorkspace !== "send" ? (
+                  <button
+                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    onClick={() => setActiveWorkspace("send")}
+                  >
+                    Go To Send
+                  </button>
+                ) : null}
+                {activeWorkspace !== "receive" ? (
+                  <button
+                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    onClick={() => setActiveWorkspace("receive")}
+                  >
+                    Go To Receive
+                  </button>
+                ) : null}
+                {activeWorkspace !== "history" ? (
+                  <button
+                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    onClick={() => setActiveWorkspace("history")}
+                  >
+                    Open History
+                  </button>
+                ) : null}
+                {activeWorkspace !== "settings" ? (
+                  <button
+                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    onClick={() => setActiveWorkspace("settings")}
+                  >
+                    Open Settings
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </section>
+
           <section className="rounded-2xl border border-border bg-panel p-2 shadow-card">
             <div className="flex flex-wrap gap-2">
               {WORKSPACE_TABS.map((workspace) => (
                 <button
                   key={workspace.key}
                   className={[
-                    "rounded-full px-4 py-2 text-sm",
+                    "min-w-[122px] rounded-xl px-4 py-2 text-left text-sm transition",
                     activeWorkspace === workspace.key
                       ? "bg-accent text-white"
                       : "border border-border bg-white text-muted",
                   ].join(" ")}
                   onClick={() => setActiveWorkspace(workspace.key)}
                 >
-                  {workspace.label}
-                  {workspace.key === "history" ? ` (${historyEntries.length})` : ""}
+                  <span className="block font-semibold leading-tight">
+                    {workspace.label}
+                    {workspace.key === "history" ? ` (${historyEntries.length})` : ""}
+                  </span>
+                  <span className="mt-1 block text-[11px] opacity-80">
+                    {workspace.key === "send"
+                      ? `${activeDestinationLabel} mode`
+                      : workspace.key === "receive"
+                      ? "Incoming transfers"
+                      : workspace.key === "history"
+                      ? `${historyEntries.length} records`
+                      : "App preferences"}
+                  </span>
                 </button>
               ))}
             </div>
@@ -1503,6 +1651,10 @@ function App() {
                   {mode.label}
                 </button>
               ))}
+            </div>
+
+            <div className="mt-3 rounded-xl border border-border bg-white p-3 text-xs text-muted">
+              Current send mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> · {DESTINATION_MODE_HINTS[destinationMode]}
             </div>
 
             {destinationMode === "nearby" ? (
@@ -2029,4 +2181,11 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
 

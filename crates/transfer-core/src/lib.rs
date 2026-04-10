@@ -78,6 +78,10 @@ impl TransferControl {
         self.inner.canceled.load(Ordering::SeqCst)
     }
 
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub async fn wait_if_paused(&self) -> Result<()> {
         loop {
             if self.is_canceled() {
@@ -424,11 +428,11 @@ impl ReceiverApp {
         }
     }
 
-    pub async fn receive_once(self) -> Result<ReceivedTransfer> {
+    pub async fn receive_once(&self) -> Result<ReceivedTransfer> {
         self.receive_once_internal(None, true).await
     }
 
-    pub async fn receive_once_with_progress<F>(self, on_progress: F) -> Result<ReceivedTransfer>
+    pub async fn receive_once_with_progress<F>(&self, on_progress: F) -> Result<ReceivedTransfer>
     where
         F: Fn(TransferProgress) + Send + Sync + 'static,
     {
@@ -436,13 +440,13 @@ impl ReceiverApp {
     }
 
     async fn receive_once_internal(
-        self,
+        &self,
         progress_listener: Option<ProgressListener>,
         render_terminal: bool,
     ) -> Result<ReceivedTransfer> {
         streaming::receive_streaming(
-            self.output_dir,
-            self.transport,
+            self.output_dir.clone(),
+            &self.transport,
             progress_listener,
             render_terminal,
         )
@@ -929,5 +933,4 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
-
 
