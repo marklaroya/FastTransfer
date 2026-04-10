@@ -1473,7 +1473,7 @@ function App() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                {sendIsActive ? (
+                {/* {sendIsActive ? (
                   <>
                     <button
                       className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
@@ -1501,9 +1501,9 @@ function App() {
                   >
                     Open Send
                   </button>
-                )}
+                )} */}
 
-                <button
+                {/* <button
                   className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
                   onClick={() => {
                     void startReceiver();
@@ -1522,12 +1522,12 @@ function App() {
                   disabled={!tauriReady}
                 >
                   Stop Receiver
-                </button>
+                </button> */}
               </div>
             </div>
           </section>
 
-          <section ref={workspaceTopRef} className="rounded-2xl border border-border bg-panel p-4 shadow-card">
+          {/* <section ref={workspaceTopRef} className="rounded-2xl border border-border bg-panel p-4 shadow-card">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">You Are Here</div>
@@ -1535,7 +1535,7 @@ function App() {
                 <p className="mt-1 text-sm text-muted">{activeWorkspaceContext.subtitle}</p>
                 {activeWorkspace === "send" ? (
                   <p className="mt-2 text-xs text-muted">
-                    Current mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> · {DESTINATION_MODE_HINTS[destinationMode]}
+                    Current mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> ï¿½ {DESTINATION_MODE_HINTS[destinationMode]}
                   </p>
                 ) : (
                   <p className="mt-2 text-xs text-muted">{activeWorkspaceContext.hint}</p>
@@ -1577,7 +1577,7 @@ function App() {
                 ) : null}
               </div>
             </div>
-          </section>
+          </section> */}
 
           <section className="rounded-2xl border border-border bg-panel p-2 shadow-card">
             <div className="flex flex-wrap gap-2">
@@ -1654,7 +1654,7 @@ function App() {
             </div>
 
             <div className="mt-3 rounded-xl border border-border bg-white p-3 text-xs text-muted">
-              Current send mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> · {DESTINATION_MODE_HINTS[destinationMode]}
+              Current send mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> ï¿½ {DESTINATION_MODE_HINTS[destinationMode]}
             </div>
 
             {destinationMode === "nearby" ? (
