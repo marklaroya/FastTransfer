@@ -5,6 +5,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
@@ -14,7 +15,8 @@ use protocol::{
     TRANSFER_STATUS_FRAME_LEN,
 };
 use quic::{
-    ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
+    ClientConfig, Connection, Endpoint, IdleTimeout, RecvStream, SendStream, ServerConfig,
+    TransportConfig,
 };
 use rcgen::generate_simple_self_signed;
 use rustls::{
@@ -44,7 +46,10 @@ impl QuicEndpointConfig {
     pub fn production_default() -> Self {
         Self {
             alpn: "fasttransfer/1".to_owned(),
-            idle_timeout_ms: 30_000,
+            // Large files and deep directory packages can spend a long time
+            // in hashing / flush / verification without any app-level control
+            // frames. Keep the QUIC session alive long enough for that work.
+            idle_timeout_ms: 1_800_000,
             keep_alive_interval_ms: 5_000,
         }
     }
@@ -380,8 +385,16 @@ fn build_client_config(cert_path: &Path) -> Result<ClientConfig> {
 }
 
 fn shared_transport_config() -> Arc<TransportConfig> {
+    let defaults = QuicEndpointConfig::production_default();
     let mut transport_config = TransportConfig::default();
     transport_config.max_concurrent_uni_streams(MAX_CONCURRENT_UNI_STREAMS.into());
+    transport_config.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_millis(defaults.idle_timeout_ms))
+            .expect("idle timeout must fit within Quinn's QUIC transport bounds"),
+    ));
+    transport_config.keep_alive_interval(Some(Duration::from_millis(
+        defaults.keep_alive_interval_ms,
+    )));
     Arc::new(transport_config)
 }
 
@@ -557,3 +570,5 @@ async fn read_stream_control_frame(stream: &mut RecvStream) -> Result<Vec<u8>> {
     frame.extend_from_slice(&payload);
     Ok(frame)
 }
+
+
