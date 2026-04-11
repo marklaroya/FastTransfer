@@ -1,20 +1,20 @@
-# ⚡ FastTransfer
+# FastTransfer
 
 FastTransfer is a high-performance, local-first file transfer system designed to move large files between devices at maximum speed — without using the cloud.
 
 Built for desktop and mobile, FastTransfer uses a streaming, parallelized transfer pipeline over QUIC to deliver fast, resumable, and integrity-verified transfers across devices on the same network.
 
-## 🚀 Why FastTransfer?
+## Why FastTransfer?
 
-- ⚡ **Streaming transfers** — start sending immediately without waiting for full file scans
-- 🚀 **High throughput** — chunked + parallel transfers over QUIC
-- 🔁 **Resume support** — continue interrupted transfers without restarting
-- 🔒 **Integrity verified** — SHA-256 validation per chunk and per file
-- 🌐 **Local-first** — no cloud, no upload/download delays
-- 📁 **Folder support** — send entire directories with structure preserved
+- **Streaming transfers** — start sending immediately without waiting for full file scans
+- **High throughput** — chunked + parallel transfers over QUIC
+- **Resume support** — continue interrupted transfers without restarting
+- **Integrity verified** — SHA-256 validation per chunk and per file
+- **Local-first** — no cloud, no upload/download delays
+- **Folder support** — send entire directories with structure preserved
 
 
-## 🧠 How it works
+## How it works
 
 1. Discover nearby devices over LAN (mDNS)
 2. Select a file or folder to send
