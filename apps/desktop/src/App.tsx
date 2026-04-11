@@ -31,6 +31,7 @@ import {
 
 type DestinationMode = "nearby" | "manual" | "usb" | "local";
 type WorkspaceTab = "send" | "receive" | "history" | "settings";
+type ThemePreference = "system" | "light" | "dark";
 
 const DESTINATION_MODES: Array<{ key: DestinationMode; label: string }> = [
   { key: "nearby", label: "Nearby Device" },
@@ -123,6 +124,7 @@ type BatchSendPlan = {
 };
 
 const HISTORY_STORAGE_KEY = "fasttransfer.desktop.history.v1";
+const THEME_STORAGE_KEY = "fasttransfer.desktop.theme.v1";
 const MAX_HISTORY_ENTRIES = 40;
 const DRIVE_SCAN_TIMEOUT_MS = 6000;
 const FILE_PICKER_TIMEOUT_MS = 20000;
@@ -242,24 +244,48 @@ function formatDuration(seconds: number): string {
 
   return `${remainingSeconds}s`;
 }
+function readThemePreference(): ThemePreference {
+  if (typeof window === "undefined") {
+    return "system";
+  }
+
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") {
+      return stored;
+    }
+  } catch {
+    // ignore storage read failures
+  }
+
+  return "system";
+}
+
+function readSystemPrefersDark(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
 function stateChipClasses(state: string): string {
   if (state === "completed" || state === "listening") {
     return "bg-accentSoft text-accent";
   }
 
   if (state === "error") {
-    return "bg-[#fde8e8] text-[#b42318]";
+    return "bg-dangerSoft text-dangerInk";
   }
 
   if (state === "paused" || state === "stopped") {
-    return "bg-[#fff4e5] text-[#9a5b00]";
+    return "bg-warningSoft text-warningInk";
   }
 
   if (state === "receiving" || state === "sending") {
-    return "bg-[#e6f4ff] text-[#005da6]";
+    return "bg-infoSoft text-infoInk";
   }
 
-  return "bg-[#edf1f1] text-[#4b5f63]";
+  return "bg-neutralSoft text-neutralInk";
 }
 function App() {
   const tauriReady = useMemo(() => isTauriRuntime(), []);
@@ -270,6 +296,9 @@ function App() {
 
   const [destinationMode, setDestinationMode] = useState<DestinationMode>("nearby");
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceTab>("send");
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => readThemePreference());
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => readSystemPrefersDark());
+  const resolvedTheme = themePreference === "system" ? (systemPrefersDark ? "dark" : "light") : themePreference;
   const [showAdvancedSend, setShowAdvancedSend] = useState(false);
 
   const [receivers, setReceivers] = useState<ReceiverListItem[]>([]);
@@ -425,6 +454,48 @@ function App() {
       // ignore storage write failures
     }
   }, [historyEntries]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSystemPrefersDark(event.matches);
+    };
+
+    setSystemPrefersDark(mediaQuery.matches);
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+
+    mediaQuery.addListener(handleChange);
+    return () => mediaQuery.removeListener(handleChange);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
+    } catch {
+      // ignore storage write failures
+    }
+  }, [themePreference]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.style.colorScheme = resolvedTheme;
+  }, [resolvedTheme]);
 
   useEffect(() => {
     if (!didMountWorkspaceRef.current) {
@@ -1227,19 +1298,19 @@ function App() {
           <h1 className="text-2xl font-semibold tracking-tight">FastTransfer</h1>
           <p className="mt-2 text-sm text-muted">Desktop sender/receiver for LAN and local copy.</p>
 
-          <div className="mt-6 rounded-xl border border-border bg-[#f8fbfb] p-3 text-xs text-muted">
+          <div className="mt-6 rounded-xl border border-border bg-surfaceMuted p-3 text-xs text-muted">
             {uiNote}
           </div>
 
           {uiError ? (
-            <div className="mt-3 rounded-xl border border-[#f2c6c6] bg-[#fff3f3] p-3 text-xs text-[#b42318]">
+            <div className="mt-3 rounded-xl border border-dangerSoft bg-dangerSoft p-3 text-xs text-dangerInk">
               {uiError}
             </div>
           ) : null}
 
           <div className="mt-6 space-y-2">
             {/* <button
-              className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-sm font-medium"
+              className="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm font-medium"
               onClick={() => {
                 void pickSource("pick_source_file");
               }}
@@ -1248,7 +1319,7 @@ function App() {
               Select File
             </button> */}
             <button
-              className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-sm font-medium"
+              className="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm font-medium"
               onClick={() => {
                 void addSourceFiles();
               }}
@@ -1257,7 +1328,7 @@ function App() {
               Add Files
             </button>
             <button
-              className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-sm font-medium"
+              className="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm font-medium"
               onClick={() => {
                 void pickSource("pick_source_folder");
               }}
@@ -1267,7 +1338,7 @@ function App() {
             </button>
           </div>
 
-          <div className="mt-6 rounded-xl border border-border bg-white p-3 text-xs text-muted">
+          <div className="mt-6 rounded-xl border border-border bg-surface p-3 text-xs text-muted">
             <div className="flex items-center justify-between gap-2">
               <div className="font-semibold text-ink">Source</div>
               <div className="text-[11px]">
@@ -1280,10 +1351,10 @@ function App() {
             {sourcePaths.length > 0 ? (
               <div className="mt-2 max-h-40 space-y-1 overflow-y-auto pr-1">
                 {sourcePaths.map((path, index) => (
-                  <div key={`${path}-${index}`} className="flex items-start gap-2 rounded-lg border border-border bg-[#f8fbfb] p-2">
+                  <div key={`${path}-${index}`} className="flex items-start gap-2 rounded-lg border border-border bg-surfaceMuted p-2">
                     <div className="min-w-0 flex-1 break-all">{path}</div>
                     <button
-                      className="rounded-md border border-border bg-white px-2 py-1 text-[11px]"
+                      className="rounded-md border border-border bg-surface px-2 py-1 text-[11px]"
                       onClick={() => removeSourceAt(index)}
                       disabled={sendBusy}
                     >
@@ -1296,7 +1367,7 @@ function App() {
 
             {sourcePaths.length > 1 ? (
               <button
-                className="mt-2 rounded-lg border border-border bg-white px-3 py-1 text-[11px]"
+                className="mt-2 rounded-lg border border-border bg-surface px-3 py-1 text-[11px]"
                 onClick={clearSources}
                 disabled={sendBusy}
               >
@@ -1310,7 +1381,7 @@ function App() {
               </div>
             ) : null}
           </div>
-          {/* <section className="mt-6 rounded-xl border border-border bg-white p-4">
+          {/* <section className="mt-6 rounded-xl border border-border bg-surface p-4">
             <div className="flex items-center justify-between">
               <div className="text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
               <button
@@ -1371,7 +1442,7 @@ function App() {
 
             {sourceSummary ? (
               <button
-                className="mt-3 w-full rounded-lg border border-border bg-[#f8fbfb] px-3 py-2 text-xs"
+                className="mt-3 w-full rounded-lg border border-border bg-surfaceMuted px-3 py-2 text-xs"
                 onClick={() => {
                   setChunkSize(String(sourceSummary.recommendedChunkSize));
                   setParallelism(String(sourceSummary.recommendedParallelism));
@@ -1382,7 +1453,7 @@ function App() {
               </button>
             ) : null}
           </section> */}
-          {/* <section className="mt-6 rounded-xl border border-border bg-white p-4 text-xs text-muted">
+          {/* <section className="mt-6 rounded-xl border border-border bg-surface p-4 text-xs text-muted">
             <div className="flex items-center justify-between">
               <div className="font-semibold uppercase tracking-wide">Recent History</div>
               <button
@@ -1399,7 +1470,7 @@ function App() {
             ) : (
               <div className="mt-2 space-y-2">
                 {recentHistoryEntries.map((entry) => (
-                  <div key={entry.id} className="rounded-lg border border-border bg-[#f8fbfb] p-2">
+                  <div key={entry.id} className="rounded-lg border border-border bg-surfaceMuted p-2">
                     <div className="flex items-center justify-between gap-2">
                       <div className="font-semibold text-ink">{entry.direction === "send" ? "Send" : "Receive"}</div>
                       <span
@@ -1408,8 +1479,8 @@ function App() {
                           entry.result === "completed"
                             ? "bg-accentSoft text-accent"
                             : entry.result === "stopped"
-                            ? "bg-[#fff4e5] text-[#9a5b00]"
-                            : "bg-[#fde8e8] text-[#b42318]",
+                            ? "bg-warningSoft text-warningInk"
+                            : "bg-dangerSoft text-dangerInk",
                         ].join(" ")}
                       >
                         {entry.result}
@@ -1440,11 +1511,11 @@ function App() {
               </div>
             </div>
 
-            <div className="mt-3 h-2 w-full rounded-full bg-[#e7efef]">
+            <div className="mt-3 h-2 w-full rounded-full bg-surfaceMuted">
               <div
                 className={[
                   "h-2 rounded-full transition-all duration-200",
-                  sendPaused && sendIsActive ? "bg-[#d99a12]" : "bg-accent",
+                  sendPaused && sendIsActive ? "bg-warningInk" : "bg-accent",
                 ].join(" ")}
                 style={{ width: `${transferBarPercent.toFixed(2)}%` }}
               />
@@ -1460,7 +1531,7 @@ function App() {
             ) : null}
 
             <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-              <div className="rounded-xl border border-border bg-white p-3 text-xs text-muted">
+              <div className="rounded-xl border border-border bg-surface p-3 text-xs text-muted">
                 <div className="font-semibold text-ink">Live Metrics</div>
                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
                   <span>
@@ -1476,7 +1547,7 @@ function App() {
                 {/* {sendIsActive ? (
                   <>
                     <button
-                      className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                      className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                       onClick={() => {
                         void controlActiveSend(sendPaused ? "resume" : "pause");
                       }}
@@ -1485,7 +1556,7 @@ function App() {
                       {sendPaused ? "Resume" : "Pause"}
                     </button>
                     <button
-                      className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-3 py-1 text-xs text-[#b42318]"
+                      className="rounded-xl border border-dangerSoft bg-dangerSoft px-3 py-1 text-xs text-dangerInk"
                       onClick={() => {
                         void controlActiveSend("stop");
                       }}
@@ -1496,7 +1567,7 @@ function App() {
                   </>
                 ) : (
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                     onClick={() => setActiveWorkspace("send")}
                   >
                     Open Send
@@ -1504,7 +1575,7 @@ function App() {
                 )} */}
 
                 {/* <button
-                  className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                  className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                   onClick={() => {
                     void startReceiver();
                     setActiveWorkspace("receive");
@@ -1514,7 +1585,7 @@ function App() {
                   Start Receiver
                 </button>
                 <button
-                  className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                  className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                   onClick={() => {
                     void stopReceiver();
                     setActiveWorkspace("receive");
@@ -1545,7 +1616,7 @@ function App() {
               <div className="flex flex-wrap items-center gap-2">
                 {activeWorkspace !== "send" ? (
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                     onClick={() => setActiveWorkspace("send")}
                   >
                     Go To Send
@@ -1553,7 +1624,7 @@ function App() {
                 ) : null}
                 {activeWorkspace !== "receive" ? (
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                     onClick={() => setActiveWorkspace("receive")}
                   >
                     Go To Receive
@@ -1561,7 +1632,7 @@ function App() {
                 ) : null}
                 {activeWorkspace !== "history" ? (
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                     onClick={() => setActiveWorkspace("history")}
                   >
                     Open History
@@ -1569,7 +1640,7 @@ function App() {
                 ) : null}
                 {activeWorkspace !== "settings" ? (
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-1 text-xs"
+                    className="rounded-xl border border-border bg-surface px-3 py-1 text-xs"
                     onClick={() => setActiveWorkspace("settings")}
                   >
                     Open Settings
@@ -1588,7 +1659,7 @@ function App() {
                     "min-w-[122px] rounded-xl px-4 py-2 text-left text-sm transition",
                     activeWorkspace === workspace.key
                       ? "bg-accent text-white"
-                      : "border border-border bg-white text-muted",
+                      : "border border-border bg-surface text-muted",
                   ].join(" ")}
                   onClick={() => setActiveWorkspace(workspace.key)}
                 >
@@ -1620,7 +1691,7 @@ function App() {
                 </p>
               </div>
               <button
-                className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                className="rounded-xl border border-border bg-surface px-4 py-2 text-sm"
                 onClick={() => {
                   if (destinationMode === "nearby") {
                     void refreshReceivers();
@@ -1643,7 +1714,7 @@ function App() {
                     "rounded-full px-4 py-2 text-sm",
                     destinationMode === mode.key
                       ? "bg-accent text-white"
-                      : "border border-border bg-white text-muted",
+                      : "border border-border bg-surface text-muted",
                   ].join(" ")}
                   onClick={() => setDestinationMode(mode.key)}
                   disabled={!tauriReady || sendBusy}
@@ -1653,12 +1724,12 @@ function App() {
               ))}
             </div>
 
-            <div className="mt-3 rounded-xl border border-border bg-white p-3 text-xs text-muted">
+            <div className="mt-3 rounded-xl border border-border bg-surface p-3 text-xs text-muted">
               Current send mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> � {DESTINATION_MODE_HINTS[destinationMode]}
             </div>
 
             {destinationMode === "nearby" ? (
-              <div className="mt-5 rounded-xl border border-border bg-white p-4">
+              <div className="mt-5 rounded-xl border border-border bg-surface p-4">
                 <div className="mb-3 flex items-center justify-between">
                   <div className="text-sm font-semibold">Nearby Receivers</div>
                   <button
@@ -1698,14 +1769,14 @@ function App() {
                           "w-full rounded-xl border px-3 py-3 text-left",
                           selectedPeerId === receiver.peerId
                             ? "border-accent bg-accentSoft"
-                            : "border-border bg-white",
+                            : "border-border bg-surface",
                         ].join(" ")}
                         onClick={() => setSelectedPeerId(receiver.peerId)}
                         disabled={sendBusy}
                       >
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-sm font-semibold">{receiver.deviceName}</span>
-                          <span className="rounded-full bg-white px-2 py-1 font-mono text-[11px] text-muted">
+                          <span className="rounded-full bg-surface px-2 py-1 font-mono text-[11px] text-muted">
                             {receiver.shortFingerprint}
                           </span>
                         </div>
@@ -1719,7 +1790,7 @@ function App() {
             ) : null}
 
             {destinationMode === "manual" ? (
-              <div className="mt-5 grid gap-3 rounded-xl border border-border bg-white p-4 md:grid-cols-2">
+              <div className="mt-5 grid gap-3 rounded-xl border border-border bg-surface p-4 md:grid-cols-2">
                 <label className="text-sm">
                   <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Receiver Address</div>
                   <input
@@ -1752,7 +1823,7 @@ function App() {
                       disabled={sendBusy}
                     />
                     <button
-                      className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
+                      className="rounded-xl border border-border bg-surface px-3 py-2 text-sm"
                       onClick={() => {
                         void pickCertificate();
                       }}
@@ -1766,7 +1837,7 @@ function App() {
             ) : null}
 
             {destinationMode === "usb" ? (
-              <div className="mt-5 rounded-xl border border-border bg-white p-4">
+              <div className="mt-5 rounded-xl border border-border bg-surface p-4">
                 <div className="mb-3 flex items-center justify-between">
                   <div className="text-sm font-semibold">Removable Drives</div>
                   <button
@@ -1791,7 +1862,7 @@ function App() {
                           "w-full rounded-xl border px-3 py-3 text-left",
                           selectedDriveId === drive.id
                             ? "border-accent bg-accentSoft"
-                            : "border-border bg-white",
+                            : "border-border bg-surface",
                         ].join(" ")}
                         onClick={() => setSelectedDriveId(drive.id)}
                         disabled={sendBusy}
@@ -1808,7 +1879,7 @@ function App() {
             ) : null}
 
             {destinationMode === "local" ? (
-              <div className="mt-5 rounded-xl border border-border bg-white p-4">
+              <div className="mt-5 rounded-xl border border-border bg-surface p-4">
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Destination Folder</div>
                 <div className="flex gap-2">
                   <input
@@ -1819,7 +1890,7 @@ function App() {
                     disabled={sendBusy}
                   />
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
+                    className="rounded-xl border border-border bg-surface px-3 py-2 text-sm"
                     onClick={() => {
                       void pickLocalDestination();
                     }}
@@ -1833,7 +1904,7 @@ function App() {
 
             <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
               <button
-                className="rounded-xl border border-border bg-white px-3 py-2 text-xs"
+                className="rounded-xl border border-border bg-surface px-3 py-2 text-xs"
                 onClick={() => setShowAdvancedSend((previous) => !previous)}
                 disabled={sendBusy}
               >
@@ -1886,7 +1957,7 @@ function App() {
               <>
                 <div className="mt-3 flex gap-2">
                   <button
-                    className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                    className="rounded-xl border border-border bg-surface px-4 py-2 text-sm"
                     onClick={() => {
                       void controlActiveSend(sendPaused ? "resume" : "pause");
                     }}
@@ -1895,7 +1966,7 @@ function App() {
                     {sendPaused ? "Resume" : "Pause"}
                   </button>
                   <button
-                    className="rounded-xl border border-[#f2c6c6] bg-[#fff3f3] px-4 py-2 text-sm text-[#b42318]"
+                    className="rounded-xl border border-dangerSoft bg-dangerSoft px-4 py-2 text-sm text-dangerInk"
                     onClick={() => {
                       void controlActiveSend("stop");
                     }}
@@ -1928,13 +1999,13 @@ function App() {
             ) : null}
 
             {destinationMode === "nearby" && selectedReceiver ? (
-              <div className="mt-4 rounded-xl border border-border bg-white p-3 text-sm text-muted">
+              <div className="mt-4 rounded-xl border border-border bg-surface p-3 text-sm text-muted">
                 Selected device: <span className="font-semibold text-ink">{selectedReceiver.deviceName}</span> ({selectedReceiver.shortFingerprint})
               </div>
             ) : null}
 
             {destinationMode === "usb" && selectedDrive ? (
-              <div className="mt-4 rounded-xl border border-border bg-white p-3 text-sm text-muted">
+              <div className="mt-4 rounded-xl border border-border bg-surface p-3 text-sm text-muted">
                 Selected drive: <span className="font-semibold text-ink">{selectedDrive.mountPath}</span>
               </div>
             ) : null}
@@ -1950,7 +2021,7 @@ function App() {
               </div>
               <div className="flex gap-2">
                 <button
-                  className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                  className="rounded-xl border border-border bg-surface px-4 py-2 text-sm"
                   onClick={() => {
                     void startReceiver();
                   }}
@@ -1959,7 +2030,7 @@ function App() {
                   Start Receiver
                 </button>
                 <button
-                  className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                  className="rounded-xl border border-border bg-surface px-4 py-2 text-sm"
                   onClick={() => {
                     void stopReceiver();
                   }}
@@ -1991,7 +2062,7 @@ function App() {
                     onChange={(event) => setReceiverOutputDir(event.target.value)}
                   />
                   <button
-                    className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
+                    className="rounded-xl border border-border bg-surface px-3 py-2 text-sm"
                     onClick={() => {
                       void pickReceiverOutputDir();
                     }}
@@ -2010,7 +2081,7 @@ function App() {
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">History</h3>
                 <button
-                  className="rounded-xl border border-border bg-white px-3 py-2 text-xs"
+                  className="rounded-xl border border-border bg-surface px-3 py-2 text-xs"
                   onClick={clearHistory}
                   disabled={historyEntries.length === 0}
                 >
@@ -2023,7 +2094,7 @@ function App() {
               ) : (
                 <div className="mt-4 space-y-3">
                   {historyEntries.map((entry) => (
-                    <div key={entry.id} className="rounded-xl border border-border bg-white p-3">
+                    <div key={entry.id} className="rounded-xl border border-border bg-surface p-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="text-sm font-semibold text-ink">
                           {entry.direction === "send" ? "Send" : "Receive"}
@@ -2035,8 +2106,8 @@ function App() {
                               entry.result === "completed"
                                 ? "bg-accentSoft text-accent"
                                 : entry.result === "stopped"
-                                ? "bg-[#fff4e5] text-[#9a5b00]"
-                                : "bg-[#fde8e8] text-[#b42318]",
+                                ? "bg-warningSoft text-warningInk"
+                                : "bg-dangerSoft text-dangerInk",
                             ].join(" ")}
                           >
                             {entry.result}
@@ -2063,7 +2134,7 @@ function App() {
                       {entry.direction === "send" ? (
                         <div className="mt-3">
                           <button
-                            className="rounded-lg border border-border bg-white px-3 py-1 text-xs"
+                            className="rounded-lg border border-border bg-surface px-3 py-1 text-xs"
                             onClick={() => {
                               applyHistorySettings(entry);
                               setActiveWorkspace("send");
@@ -2084,6 +2155,41 @@ function App() {
             <section className="rounded-2xl border border-border bg-panel p-6 shadow-card">
               <h2 className="text-xl font-semibold">Settings</h2>
               <p className="mt-1 text-sm text-muted">Tune transfer defaults and receiver preferences.</p>
+
+              <div className="mt-5 rounded-2xl border border-border bg-surface p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-ink">Theme</div>
+                    <p className="mt-1 text-xs text-muted">
+                      Choose how FastTransfer looks across the desktop app.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-surfaceMuted px-3 py-1 text-[11px] font-mono text-muted">
+                    Active: {resolvedTheme}{themePreference === "system" ? " (system)" : ""}
+                  </span>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {([
+                    { value: "system", label: "System" },
+                    { value: "light", label: "Light" },
+                    { value: "dark", label: "Dark" },
+                  ] as Array<{ value: ThemePreference; label: string }>).map((option) => (
+                    <button
+                      key={option.value}
+                      className={[
+                        "rounded-xl px-4 py-2 text-sm transition",
+                        themePreference === option.value
+                          ? "bg-accent text-white"
+                          : "border border-border bg-surface text-muted",
+                      ].join(" ")}
+                      onClick={() => setThemePreference(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <div className="mt-5 grid gap-4 lg:grid-cols-2">
                 <label className="text-sm">
@@ -2134,7 +2240,7 @@ function App() {
                       onChange={(event) => setReceiverOutputDir(event.target.value)}
                     />
                     <button
-                      className="rounded-xl border border-border bg-white px-3 py-2 text-sm"
+                      className="rounded-xl border border-border bg-surface px-3 py-2 text-sm"
                       onClick={() => {
                         void pickReceiverOutputDir();
                       }}
@@ -2148,7 +2254,7 @@ function App() {
 
               <div className="mt-5 flex flex-wrap gap-2">
                 <button
-                  className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                  className="rounded-xl border border-border bg-surface px-4 py-2 text-sm"
                   onClick={() => {
                     setServerName(DEFAULT_SERVER_NAME);
                     setChunkSize("1048576");
@@ -2160,7 +2266,7 @@ function App() {
                 </button>
                 {sourceSummary ? (
                   <button
-                    className="rounded-xl border border-border bg-white px-4 py-2 text-sm"
+                    className="rounded-xl border border-border bg-surface px-4 py-2 text-sm"
                     onClick={() => {
                       setChunkSize(String(sourceSummary.recommendedChunkSize));
                       setParallelism(String(sourceSummary.recommendedParallelism));
@@ -2181,6 +2287,11 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
 
 
 
