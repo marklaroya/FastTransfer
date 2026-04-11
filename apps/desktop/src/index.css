@@ -28,7 +28,7 @@
 }
 
 :root[data-theme="dark"] {
-  --color-canvas: 12 18 22;
+  --color-canvas: 20 20 20;
   --color-panel: 20 28 34;
   --color-surface: 24 34 41;
   --color-surface-muted: 30 41 49;
