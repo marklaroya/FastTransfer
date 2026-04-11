@@ -1242,8 +1242,12 @@ fn emit_receiver_status(app: &AppHandle, payload: ReceiverStatusPayload) {
 }
 
 fn desktop_runtime_dir() -> Result<PathBuf> {
-    let current_dir = std::env::current_dir().context("failed to resolve the current working directory")?;
-    Ok(current_dir.join(".fasttransfer-desktop"))
+    if let Some(local_data_dir) = dirs::data_local_dir() {
+        return Ok(local_data_dir.join("FastTransfer Desktop"));
+    }
+
+    let home_dir = dirs::home_dir().context("failed to resolve a local app-data or home directory")?;
+    Ok(home_dir.join(".fasttransfer-desktop"))
 }
 
 fn trust_cache_dir() -> Result<PathBuf> {
@@ -1565,5 +1569,6 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running FastTransfer desktop");
 }
+
 
 
