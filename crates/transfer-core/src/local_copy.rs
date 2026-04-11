@@ -18,6 +18,7 @@ use crate::{
     progress::ProgressListener,
     ProgressReporter,
     TransferControl,
+    TransferIssue,
     TransferSummary,
     TransferSourceSummary,
 };
@@ -31,6 +32,19 @@ async fn wait_for_transfer_control(control: Option<&TransferControl>) -> Result<
     }
 
     Ok(())
+}
+
+fn record_transfer_issue(
+    issues: &mut Vec<TransferIssue>,
+    failed_files: &mut u64,
+    path: &str,
+    message: impl Into<String>,
+) {
+    *failed_files = failed_files.saturating_add(1);
+    issues.push(TransferIssue {
+        path: path.to_owned(),
+        message: message.into(),
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,23 +116,33 @@ pub(crate) async fn copy_local_streaming(
 
     let mut aggregate_hasher = Sha256State::new();
     let mut completed_files = 0_u64;
-    let mut total_chunks = 0_u64;
+    let mut completed_chunks = 0_u64;
+    let mut failed_files = 0_u64;
+    let mut issues = Vec::new();
 
     let package_root = request.destination_dir.join(&inspection.root_name);
     match inspection.root_kind {
         PackageItemKind::File => {
-            copy_single_file(
+            if let Err(error) = copy_single_file(
                 request.source_path.as_path(),
                 package_root.as_path(),
                 inspection.root_name.as_str(),
                 &request,
                 &mut reporter,
                 &mut completed_files,
-                &mut total_chunks,
+                &mut completed_chunks,
                 &mut aggregate_hasher,
                 control.as_ref(),
             )
-            .await?;
+            .await
+            {
+                record_transfer_issue(
+                    &mut issues,
+                    &mut failed_files,
+                    inspection.root_name.as_str(),
+                    format!("{error:#}"),
+                );
+            }
         }
         PackageItemKind::Directory => {
             fs::create_dir_all(&package_root)
@@ -132,7 +156,9 @@ pub(crate) async fn copy_local_streaming(
                 &request,
                 &mut reporter,
                 &mut completed_files,
-                &mut total_chunks,
+                &mut completed_chunks,
+                &mut failed_files,
+                &mut issues,
                 &mut aggregate_hasher,
                 control.as_ref(),
             )
@@ -140,7 +166,7 @@ pub(crate) async fn copy_local_streaming(
         }
     }
 
-    reporter.set_completed_files(inspection.total_files);
+    reporter.set_completed_files(completed_files);
     let snapshot = reporter.finish();
     let aggregate = aggregate_hasher.finalize();
 
@@ -155,11 +181,14 @@ pub(crate) async fn copy_local_streaming(
         bytes_transferred: snapshot.bytes_transferred,
         elapsed: snapshot.elapsed,
         average_mib_per_sec: snapshot.average_mib_per_sec,
-        completed_chunks: total_chunks,
+        completed_chunks,
         completed_files,
+        total_files: inspection.total_files,
+        failed_files,
         total_directories: inspection.total_directories,
         sha256_hex: format_sha256(&aggregate),
-        integrity_verified: true,
+        integrity_verified: failed_files == 0,
+        issues,
     })
 }
 
@@ -171,7 +200,9 @@ async fn stream_directory_copy(
     request: &LocalCopyRequest,
     reporter: &mut ProgressReporter,
     completed_files: &mut u64,
-    total_chunks: &mut u64,
+    completed_chunks: &mut u64,
+    failed_files: &mut u64,
+    issues: &mut Vec<TransferIssue>,
     aggregate_hasher: &mut Sha256State,
     control: Option<&TransferControl>,
 ) -> Result<()> {
@@ -195,42 +226,91 @@ async fn stream_directory_copy(
             .path
             .strip_prefix(source_root)
             .with_context(|| format!("failed to compute relative path for {}", entry.path.display()))?;
-        let relative_path = normalize_relative_path(relative)?;
-        let destination_path = destination_root.join(safe_relative_path(&relative_path)?);
+        let relative_path = match normalize_relative_path(relative) {
+            Ok(path) => path,
+            Err(error) => {
+                record_transfer_issue(
+                    issues,
+                    failed_files,
+                    &entry.path.display().to_string(),
+                    format!("failed to normalize relative path: {error:#}"),
+                );
+                continue;
+            }
+        };
+        let destination_path = match safe_relative_path(&relative_path) {
+            Ok(path) => destination_root.join(path),
+            Err(error) => {
+                record_transfer_issue(
+                    issues,
+                    failed_files,
+                    &format!("{}/{}", inspection.root_name, relative_path),
+                    format!("destination path was not safe: {error:#}"),
+                );
+                continue;
+            }
+        };
 
         if entry.is_dir {
-            fs::create_dir_all(&destination_path)
-                .await
-                .with_context(|| {
+            if let Err(error) = fs::create_dir_all(&destination_path).await {
+                record_transfer_issue(
+                    issues,
+                    failed_files,
+                    &format!("{}/{}", inspection.root_name, relative_path),
                     format!(
-                        "failed to create destination directory {}",
+                        "failed to create destination directory {}: {error:#}",
                         destination_path.display()
-                    )
-                })?;
+                    ),
+                );
+                continue;
+            }
             reporter.set_current_path(Some(format!(
                 "{}/{}",
                 inspection.root_name, relative_path
             )));
+            let child_entries = match read_sorted_entries(&entry.path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    record_transfer_issue(
+                        issues,
+                        failed_files,
+                        &format!("{}/{}", inspection.root_name, relative_path),
+                        format!(
+                            "failed to enumerate source directory {}: {error:#}",
+                            entry.path.display()
+                        ),
+                    );
+                    continue;
+                }
+            };
             stack.push(DirectoryFrame {
-                entries: read_sorted_entries(&entry.path)?,
+                entries: child_entries,
                 index: 0,
             });
             continue;
         }
 
         if entry.is_file {
-            copy_single_file(
+            if let Err(error) = copy_single_file(
                 &entry.path,
                 &destination_path,
                 format!("{}/{}", inspection.root_name, relative_path).as_str(),
                 request,
                 reporter,
                 completed_files,
-                total_chunks,
+                completed_chunks,
                 aggregate_hasher,
                 control,
             )
-            .await?;
+            .await
+            {
+                record_transfer_issue(
+                    issues,
+                    failed_files,
+                    &format!("{}/{}", inspection.root_name, relative_path),
+                    format!("{error:#}"),
+                );
+            }
         }
     }
 
@@ -245,7 +325,7 @@ async fn copy_single_file(
     request: &LocalCopyRequest,
     reporter: &mut ProgressReporter,
     completed_files: &mut u64,
-    total_chunks: &mut u64,
+    completed_chunks: &mut u64,
     aggregate_hasher: &mut Sha256State,
     control: Option<&TransferControl>,
 ) -> Result<()> {
@@ -270,7 +350,6 @@ async fn copy_single_file(
     } else {
         ((file_size + request.chunk_size.max(1) as u64 - 1) / request.chunk_size.max(1) as u64) as u64
     };
-    *total_chunks = total_chunks.saturating_add(chunk_count);
 
     if let Some(parent) = destination_path.parent() {
         fs::create_dir_all(parent)
@@ -356,6 +435,7 @@ async fn copy_single_file(
 
     aggregate_hasher.update(&file_hash);
     *completed_files = completed_files.saturating_add(1);
+    *completed_chunks = completed_chunks.saturating_add(chunk_count);
     reporter.set_completed_files(*completed_files);
 
     println!("[TRANSFER] Finished file in {:?}", file_start.elapsed());
@@ -437,4 +517,3 @@ fn safe_relative_path(relative_path: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
-

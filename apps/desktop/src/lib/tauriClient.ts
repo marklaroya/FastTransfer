@@ -49,6 +49,11 @@ export type ProgressPayload = {
   completed: boolean;
 };
 
+export type TransferIssuePayload = {
+  path: string;
+  message: string;
+};
+
 export type TransferSummaryPayload = {
   fileName: string;
   bytesTransferred: number;
@@ -56,9 +61,12 @@ export type TransferSummaryPayload = {
   averageMibPerSec: number;
   completedChunks: number;
   completedFiles: number;
+  totalFiles: number;
+  failedFiles: number;
   totalDirectories: number;
   sha256Hex: string;
   integrityVerified: boolean;
+  issues: TransferIssuePayload[];
 };
 
 export type SendStatusPayload = {

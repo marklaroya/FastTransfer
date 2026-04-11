@@ -1,4 +1,4 @@
-﻿//! Terminal progress reporting helpers for transfer progress updates.
+//! Terminal progress reporting helpers for transfer progress updates.
 
 use std::{
     io::{self, Write},
@@ -132,7 +132,6 @@ impl ProgressReporter {
 
     /// Renders a final line and returns the summary snapshot.
     pub fn finish(&mut self) -> ProgressSnapshot {
-        self.completed_files = self.total_files;
         if self.render_terminal {
             self.render(true);
             println!();
@@ -202,3 +201,4 @@ fn percent_complete(transferred_bytes: u64, total_bytes: u64) -> f64 {
         (transferred_bytes as f64 / total_bytes as f64) * 100.0
     }
 }
+

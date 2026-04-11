@@ -28,7 +28,7 @@ use tokio::{
 
 use crate::{
     configure_reporter, sender_checkpoint_base_dir, ProgressListener, ProgressReporter,
-    ReceivedTransfer, SendRequest, TransferControl, TransferSummary,
+    ReceivedTransfer, SendRequest, TransferControl, TransferIssue, TransferSummary,
 };
 
 const BUFFER_SIZE: usize = 256 * 1024;
@@ -39,6 +39,19 @@ async fn wait_for_transfer_control(control: Option<&TransferControl>) -> Result<
     }
 
     Ok(())
+}
+
+fn record_transfer_issue(
+    issues: &mut Vec<TransferIssue>,
+    failed_files: &mut u64,
+    path: &str,
+    message: impl Into<String>,
+) {
+    *failed_files = failed_files.saturating_add(1);
+    issues.push(TransferIssue {
+        path: path.to_owned(),
+        message: message.into(),
+    });
 }
 
 pub(crate) async fn send_streaming(
@@ -93,7 +106,10 @@ pub(crate) async fn send_streaming(
     let mut total_directories = if root_kind == PackageItemKind::Directory { 1_u64 } else { 0_u64 };
     let mut total_bytes = 0_u64;
     let mut completed_files = 0_u64;
-    let mut total_chunks = 0_u64;
+    let mut completed_bytes = 0_u64;
+    let mut completed_chunks = 0_u64;
+    let mut failed_files = 0_u64;
+    let mut issues = Vec::new();
     let mut aggregate_hasher = Sha256State::new();
 
     if root_kind == PackageItemKind::File {
@@ -109,7 +125,10 @@ pub(crate) async fn send_streaming(
             &mut total_files,
             &mut total_bytes,
             &mut completed_files,
-            &mut total_chunks,
+            &mut completed_bytes,
+            &mut completed_chunks,
+            &mut failed_files,
+            &mut issues,
             &mut aggregate_hasher,
             transfer_control.as_ref(),
         )
@@ -128,7 +147,10 @@ pub(crate) async fn send_streaming(
             &mut total_directories,
             &mut total_bytes,
             &mut completed_files,
-            &mut total_chunks,
+            &mut completed_bytes,
+            &mut completed_chunks,
+            &mut failed_files,
+            &mut issues,
             &mut aggregate_hasher,
             transfer_control.as_ref(),
         )
@@ -138,9 +160,9 @@ pub(crate) async fn send_streaming(
     let aggregate_sha256 = aggregate_hasher.finalize();
     control
         .send_message(&SenderControlMessage::TransferComplete(StreamTransferComplete {
-            total_files,
+            total_files: completed_files,
             total_directories,
-            total_bytes,
+            total_bytes: completed_bytes,
             aggregate_sha256,
         }))
         .await?;
@@ -164,7 +186,7 @@ pub(crate) async fn send_streaming(
     })?;
 
     reporter.set_phase("sending");
-    reporter.set_completed_files(total_files);
+    reporter.set_completed_files(completed_files);
     let snapshot = reporter.finish();
     transport.close();
 
@@ -173,11 +195,14 @@ pub(crate) async fn send_streaming(
         bytes_transferred: snapshot.bytes_transferred,
         elapsed: snapshot.elapsed,
         average_mib_per_sec: snapshot.average_mib_per_sec,
-        completed_chunks: total_chunks,
-        completed_files: total_files,
+        completed_chunks: completed_chunks,
+        completed_files,
+        total_files,
+        failed_files,
         total_directories,
         sha256_hex: format_sha256(&aggregate_sha256),
-        integrity_verified: true,
+        integrity_verified: failed_files == 0,
+        issues,
     })
 }
 
@@ -234,7 +259,10 @@ pub(crate) async fn receive_streaming(
     let mut total_directories = if session.root_kind == PackageItemKind::Directory { 1_u64 } else { 0_u64 };
     let mut total_bytes = 0_u64;
     let mut completed_files = 0_u64;
-    let mut total_chunks = 0_u64;
+    let mut completed_bytes = 0_u64;
+    let mut completed_chunks = 0_u64;
+    let mut failed_files = 0_u64;
+    let mut issues = Vec::new();
     let mut aggregate_hasher = Sha256State::new();
 
     loop {
@@ -252,12 +280,15 @@ pub(crate) async fn receive_streaming(
                 fs::create_dir_all(&destination_fs).await.with_context(|| {
                     format!("failed to create destination directory {}", destination.display())
                 })?;
-                reporter.set_current_path(Some(display_current_path(&session.root_name, session.root_kind, &relative_path)));
+                reporter.set_current_path(Some(display_current_path(
+                    &session.root_name,
+                    session.root_kind,
+                    &relative_path,
+                )));
             }
             SenderControlMessage::FileEntry(file_entry) => {
                 total_files = total_files.saturating_add(1);
                 total_bytes = total_bytes.saturating_add(file_entry.file_size);
-                total_chunks = total_chunks.saturating_add(file_entry.chunk_count);
                 reporter.set_totals(total_bytes, total_files);
                 reporter.set_current_path(Some(display_current_path(
                     &session.root_name,
@@ -265,21 +296,57 @@ pub(crate) async fn receive_streaming(
                     &file_entry.relative_path,
                 )));
 
-                aggregate_hasher.update(&file_entry.file_sha256);
-
-                let destination = destination_path(
+                let destination = match destination_path(
                     &output_dir,
                     session.root_kind,
                     &session.root_name,
                     &file_entry.relative_path,
-                )?;
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let message = format!("receiver could not prepare {}: {error:#}", file_entry.relative_path);
+                        control
+                            .send_message(&ReceiverControlMessage::FileDisposition(StreamFileDisposition {
+                                file_id: file_entry.file_id,
+                                needed: false,
+                            }))
+                            .await?;
+                        control
+                            .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                                file_id: file_entry.file_id,
+                                success: false,
+                                message: message.clone(),
+                            }))
+                            .await?;
+                        record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                        continue;
+                    }
+                };
                 let destination_fs = filesystem_path(&destination);
 
                 if let Some(parent) = destination.parent() {
                     let parent_fs = filesystem_path(parent);
-                    fs::create_dir_all(&parent_fs).await.with_context(|| {
-                        format!("failed to create destination parent directory {}", parent.display())
-                    })?;
+                    if let Err(error) = fs::create_dir_all(&parent_fs).await {
+                        let message = format!(
+                            "failed to create destination parent directory {}: {error:#}",
+                            parent.display()
+                        );
+                        control
+                            .send_message(&ReceiverControlMessage::FileDisposition(StreamFileDisposition {
+                                file_id: file_entry.file_id,
+                                needed: false,
+                            }))
+                            .await?;
+                        control
+                            .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                                file_id: file_entry.file_id,
+                                success: false,
+                                message: message.clone(),
+                            }))
+                            .await?;
+                        record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                        continue;
+                    }
                 }
 
                 let already_complete = checkpoint.is_file_complete(
@@ -298,6 +365,9 @@ pub(crate) async fn receive_streaming(
                 if already_complete {
                     reporter.advance(file_entry.file_size);
                     completed_files = completed_files.saturating_add(1);
+                    completed_bytes = completed_bytes.saturating_add(file_entry.file_size);
+                    completed_chunks = completed_chunks.saturating_add(file_entry.chunk_count);
+                    aggregate_hasher.update(&file_entry.file_sha256);
                     reporter.set_completed_files(completed_files);
                     control
                         .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
@@ -309,25 +379,14 @@ pub(crate) async fn receive_streaming(
                     continue;
                 }
 
-                if let Err(error) = receive_file_chunks(
+                let receive_result = receive_file_chunks(
                     &incoming,
                     &destination,
                     &file_entry,
                     &session,
                     &mut reporter,
                 )
-                .await
-                {
-                    let message = format!("{error:#}");
-                    control
-                        .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
-                            file_id: file_entry.file_id,
-                            success: false,
-                            message: message.clone(),
-                        }))
-                        .await?;
-                    bail!("failed to receive file {}: {}", file_entry.relative_path, message);
-                }
+                .await;
 
                 match control.read_message().await? {
                     SenderControlMessage::FileComplete(StreamFileComplete { file_id })
@@ -336,6 +395,19 @@ pub(crate) async fn receive_streaming(
                         "expected file-complete for file {} but got {other:?}",
                         file_entry.file_id
                     ),
+                }
+
+                if let Err(error) = receive_result {
+                    let message = format!("failed to receive {}: {error:#}", file_entry.relative_path);
+                    control
+                        .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                            file_id: file_entry.file_id,
+                            success: false,
+                            message: message.clone(),
+                        }))
+                        .await?;
+                    record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                    continue;
                 }
 
                 let destination_for_hash = filesystem_path(&destination);
@@ -350,7 +422,8 @@ pub(crate) async fn receive_streaming(
                                 message: message.clone(),
                             }))
                             .await?;
-                        bail!("{message}");
+                        record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                        continue;
                     }
                     Err(error) => {
                         let message = format!("receiver file hashing task panicked for {}: {error}", file_entry.relative_path);
@@ -361,22 +434,25 @@ pub(crate) async fn receive_streaming(
                                 message: message.clone(),
                             }))
                             .await?;
-                        bail!("{message}");
+                        record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                        continue;
                     }
                 };
                 if !verify_sha256(&actual_hash, &file_entry.file_sha256) {
+                    let message = format!(
+                        "integrity mismatch: expected {}, got {}",
+                        format_sha256(&file_entry.file_sha256),
+                        format_sha256(&actual_hash)
+                    );
                     control
                         .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
                             file_id: file_entry.file_id,
                             success: false,
-                            message: format!(
-                                "integrity mismatch: expected {}, got {}",
-                                format_sha256(&file_entry.file_sha256),
-                                format_sha256(&actual_hash)
-                            ),
+                            message: message.clone(),
                         }))
                         .await?;
-                    bail!("file {} failed SHA-256 verification", file_entry.relative_path);
+                    record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                    continue;
                 }
 
                 if let Err(error) = checkpoint.mark_file_complete(
@@ -395,10 +471,14 @@ pub(crate) async fn receive_streaming(
                             message: message.clone(),
                         }))
                         .await?;
-                    bail!("{message}");
+                    record_transfer_issue(&mut issues, &mut failed_files, &file_entry.relative_path, message);
+                    continue;
                 }
 
                 completed_files = completed_files.saturating_add(1);
+                completed_bytes = completed_bytes.saturating_add(file_entry.file_size);
+                completed_chunks = completed_chunks.saturating_add(file_entry.chunk_count);
+                aggregate_hasher.update(&file_entry.file_sha256);
                 reporter.set_completed_files(completed_files);
                 control
                     .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
@@ -409,9 +489,9 @@ pub(crate) async fn receive_streaming(
                     .await?;
             }
             SenderControlMessage::TransferComplete(transfer_complete) => {
-                if transfer_complete.total_files != total_files
+                if transfer_complete.total_files != completed_files
                     || transfer_complete.total_directories != total_directories
-                    || transfer_complete.total_bytes != total_bytes
+                    || transfer_complete.total_bytes != completed_bytes
                 {
                     control
                         .send_message(&ReceiverControlMessage::TransferStatus(StreamTransferStatus {
@@ -450,7 +530,7 @@ pub(crate) async fn receive_streaming(
                 })?;
 
                 reporter.set_phase("sending");
-                reporter.set_completed_files(total_files);
+                reporter.set_completed_files(completed_files);
                 let snapshot = reporter.finish();
 
                 return Ok(ReceivedTransfer {
@@ -459,11 +539,14 @@ pub(crate) async fn receive_streaming(
                         bytes_transferred: snapshot.bytes_transferred,
                         elapsed: snapshot.elapsed,
                         average_mib_per_sec: snapshot.average_mib_per_sec,
-                        completed_chunks: total_chunks,
-                        completed_files: total_files,
+                        completed_chunks: completed_chunks,
+                        completed_files,
+                        total_files,
+                        failed_files,
                         total_directories,
                         sha256_hex: format_sha256(&aggregate),
-                        integrity_verified: true,
+                        integrity_verified: failed_files == 0,
+                        issues,
                     },
                     saved_path: package_root_path(&output_dir, session.root_kind, &session.root_name),
                     remote_address,
@@ -493,7 +576,10 @@ async fn stream_directory(
     total_directories: &mut u64,
     total_bytes: &mut u64,
     completed_files: &mut u64,
-    total_chunks: &mut u64,
+    completed_bytes: &mut u64,
+    completed_chunks: &mut u64,
+    failed_files: &mut u64,
+    issues: &mut Vec<TransferIssue>,
     aggregate_hasher: &mut Sha256State,
     transfer_control: Option<&TransferControl>,
 ) -> Result<()> {
@@ -550,7 +636,10 @@ async fn stream_directory(
                 total_files,
                 total_bytes,
                 completed_files,
-                total_chunks,
+                completed_bytes,
+                completed_chunks,
+                failed_files,
+                issues,
                 aggregate_hasher,
                 transfer_control,
             )
@@ -574,22 +663,62 @@ async fn process_file(
     total_files: &mut u64,
     total_bytes: &mut u64,
     completed_files: &mut u64,
-    total_chunks: &mut u64,
+    completed_bytes: &mut u64,
+    completed_chunks: &mut u64,
+    failed_files: &mut u64,
+    issues: &mut Vec<TransferIssue>,
     aggregate_hasher: &mut Sha256State,
     transfer_control: Option<&TransferControl>,
 ) -> Result<()> {
     wait_for_transfer_control(transfer_control).await?;
-    let metadata = stdfs::metadata(source_path)
-        .with_context(|| format!("failed to read source metadata for {}", source_path.display()))?;
+    let metadata = match stdfs::metadata(source_path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            record_transfer_issue(
+                issues,
+                failed_files,
+                &relative_path,
+                format!("sender could not read source metadata: {error}"),
+            );
+            return Ok(());
+        }
+    };
     if !metadata.is_file() {
-        bail!("expected file while scanning {}, found non-file item", source_path.display());
+        record_transfer_issue(
+            issues,
+            failed_files,
+            &relative_path,
+            format!(
+                "expected file while scanning {}, found non-file item",
+                source_path.display()
+            ),
+        );
+        return Ok(());
     }
 
     let file_size = metadata.len();
     let source_for_hash = source_path.to_path_buf();
-    let file_sha256 = spawn_blocking(move || sha256_file(&source_for_hash))
-        .await
-        .context("sender file hashing task panicked")??;
+    let file_sha256 = match spawn_blocking(move || sha256_file(&source_for_hash)).await {
+        Ok(Ok(hash)) => hash,
+        Ok(Err(error)) => {
+            record_transfer_issue(
+                issues,
+                failed_files,
+                &relative_path,
+                format!("sender failed to hash {relative_path}: {error:#}"),
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            record_transfer_issue(
+                issues,
+                failed_files,
+                &relative_path,
+                format!("sender file hashing task panicked for {relative_path}: {error}"),
+            );
+            return Ok(());
+        }
+    };
 
     let descriptors = FixedChunker::new(file_size, request.chunk_size.max(1)).descriptors();
     let chunk_count = descriptors.len() as u64;
@@ -598,7 +727,6 @@ async fn process_file(
 
     *total_files = total_files.saturating_add(1);
     *total_bytes = total_bytes.saturating_add(file_size);
-    *total_chunks = total_chunks.saturating_add(chunk_count);
 
     reporter.set_totals(*total_bytes, *total_files);
     reporter.set_current_path(Some(display_current_path(
@@ -606,8 +734,6 @@ async fn process_file(
         checkpoint.metadata.root_kind,
         &relative_path,
     )));
-
-    aggregate_hasher.update(&file_sha256);
 
     control
         .send_message(&SenderControlMessage::FileEntry(StreamFileEntry {
@@ -650,11 +776,13 @@ async fn process_file(
     };
 
     if !result.success {
-        bail!(
-            "receiver rejected file {}: {}",
-            relative_path,
-            result.message
+        record_transfer_issue(
+            issues,
+            failed_files,
+            &relative_path,
+            format!("receiver rejected file {}: {}", relative_path, result.message),
         );
+        return Ok(());
     }
 
     checkpoint
@@ -672,6 +800,9 @@ async fn process_file(
     }
 
     *completed_files = completed_files.saturating_add(1);
+    *completed_bytes = completed_bytes.saturating_add(file_size);
+    *completed_chunks = completed_chunks.saturating_add(chunk_count);
+    aggregate_hasher.update(&file_sha256);
     reporter.set_completed_files(*completed_files);
 
     Ok(())
@@ -1085,5 +1216,10 @@ fn root_name(source_path: &Path) -> Result<String> {
             )
         })
 }
+
+
+
+
+
 
 

@@ -91,6 +91,22 @@ impl From<TransferProgress> for ProgressPayload {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct TransferIssuePayload {
+    path: String,
+    message: String,
+}
+
+impl From<transfer_core::TransferIssue> for TransferIssuePayload {
+    fn from(value: transfer_core::TransferIssue) -> Self {
+        Self {
+            path: value.path,
+            message: value.message,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct TransferSummaryPayload {
     file_name: String,
     bytes_transferred: u64,
@@ -98,9 +114,12 @@ struct TransferSummaryPayload {
     average_mib_per_sec: f64,
     completed_chunks: u64,
     completed_files: u64,
+    total_files: u64,
+    failed_files: u64,
     total_directories: u64,
     sha256_hex: String,
     integrity_verified: bool,
+    issues: Vec<TransferIssuePayload>,
 }
 
 impl From<TransferSummary> for TransferSummaryPayload {
@@ -112,13 +131,15 @@ impl From<TransferSummary> for TransferSummaryPayload {
             average_mib_per_sec: value.average_mib_per_sec,
             completed_chunks: value.completed_chunks,
             completed_files: value.completed_files,
+            total_files: value.total_files,
+            failed_files: value.failed_files,
             total_directories: value.total_directories,
             sha256_hex: value.sha256_hex,
             integrity_verified: value.integrity_verified,
+            issues: value.issues.into_iter().map(Into::into).collect(),
         }
     }
 }
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackageSummaryPayload {
@@ -550,17 +571,31 @@ async fn start_receiver(
                         );
                     })
                     .await?;
-
+                let receiver_completed_with_issues = received.summary.has_issues();
+                let receiver_summary = received.summary.clone();
                 emit_receiver_status(
                     &app_handle,
                     ReceiverStatusPayload {
-                        state: "completed".to_owned(),
-                        message: format!("Saved {} from {}.", received.summary.file_name, received.remote_address),
+                        state: if receiver_completed_with_issues {
+                            "completed_with_issues".to_owned()
+                        } else {
+                            "completed".to_owned()
+                        },
+                        message: if receiver_completed_with_issues {
+                            format!(
+                                "Saved {} from {} with issues ({} failed file(s)).",
+                                receiver_summary.file_name,
+                                received.remote_address,
+                                receiver_summary.failed_files
+                            )
+                        } else {
+                            format!("Saved {} from {}.", receiver_summary.file_name, received.remote_address)
+                        },
                         bind_addr: Some(ready.bind_addr.to_string()),
                         output_dir: Some(output_dir_for_task.display().to_string()),
                         output_dir_label: Some(output_dir_label_for_task.clone()),
                         progress: None,
-                        summary: Some(received.summary.into()),
+                        summary: Some(receiver_summary.into()),
                         saved_path: Some(received.saved_path.display().to_string()),
                         saved_path_label: Some(preferred_receive_dir_label(&received.saved_path)),
                         remote_address: Some(received.remote_address.to_string()),
@@ -1082,11 +1117,19 @@ async fn run_send_task(
     .await;
 
     let payload = match result {
-        Ok(summary) => SendStatusPayload {
-            state: "completed".to_owned(),
-            message: send_success_message(&target_addr, trust_report.as_ref()),
-            progress: None,
-            summary: Some(summary.into()),
+        Ok(summary) => {
+            let completed_with_issues = summary.has_issues();
+            let message = send_success_message(&target_addr, trust_report.as_ref(), &summary);
+            SendStatusPayload {
+                state: if completed_with_issues {
+                    "completed_with_issues".to_owned()
+                } else {
+                    "completed".to_owned()
+                },
+                message,
+                progress: None,
+                summary: Some(summary.into()),
+            }
         },
         Err(_) if control.is_canceled() => SendStatusPayload {
             state: "stopped".to_owned(),
@@ -1162,11 +1205,27 @@ async fn run_local_copy_task(
     .await;
 
     let payload = match result {
-        Ok(summary) => SendStatusPayload {
-            state: "completed".to_owned(),
-            message: format!("Copy to {} completed successfully.", destination_label),
-            progress: None,
-            summary: Some(summary.into()),
+        Ok(summary) => {
+            let completed_with_issues = summary.has_issues();
+            let message = if completed_with_issues {
+                format!(
+                    "Copy to {} completed with issues ({} failed file(s)).",
+                    destination_label,
+                    summary.failed_files
+                )
+            } else {
+                format!("Copy to {} completed successfully.", destination_label)
+            };
+            SendStatusPayload {
+                state: if completed_with_issues {
+                    "completed_with_issues".to_owned()
+                } else {
+                    "completed".to_owned()
+                },
+                message,
+                progress: None,
+                summary: Some(summary.into()),
+            }
         },
         Err(_) if control.is_canceled() => SendStatusPayload {
             state: "stopped".to_owned(),
@@ -1215,13 +1274,23 @@ fn send_progress_message(trust_report: Option<&ReceiverTrustReport>, phase: &str
     }
 }
 
-fn send_success_message(target_addr: &str, trust_report: Option<&ReceiverTrustReport>) -> String {
+fn send_success_message(
+    target_addr: &str,
+    trust_report: Option<&ReceiverTrustReport>,
+    summary: &TransferSummary,
+) -> String {
+    let completion_suffix = if summary.has_issues() {
+        format!("completed with issues ({} failed file(s)).", summary.failed_files)
+    } else {
+        "completed successfully.".to_owned()
+    };
+
     match trust_report {
         Some(report) => format!(
-            "Transfer to {} ({}) at {} completed successfully.",
-            report.device_name, report.short_fingerprint, target_addr
+            "Transfer to {} ({}) at {} {}",
+            report.device_name, report.short_fingerprint, target_addr, completion_suffix
         ),
-        None => format!("Transfer to {target_addr} completed successfully."),
+        None => format!("Transfer to {target_addr} {}", completion_suffix),
     }
 }
 

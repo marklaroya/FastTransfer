@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   DEFAULT_SERVER_NAME,
   discoverNearbyReceivers,
@@ -10,7 +11,6 @@ import {
   pickCertificateFile,
   pickLocalDestinationFolder,
   pickReceiveFolder,
-  pickSourceFile,
   pickSourceFiles,
   pickSourceFolder,
   startLocalCopyTransfer,
@@ -32,6 +32,7 @@ import {
 type DestinationMode = "nearby" | "manual" | "usb" | "local";
 type WorkspaceTab = "send" | "receive" | "history" | "settings";
 type ThemePreference = "system" | "light" | "dark";
+type SourcePickerMode = "files" | "folder";
 
 const DESTINATION_MODES: Array<{ key: DestinationMode; label: string }> = [
   { key: "nearby", label: "Nearby Device" },
@@ -75,7 +76,12 @@ const DESTINATION_MODE_HINTS: Record<DestinationMode, string> = {
 };
 
 type TransferDirection = "send" | "receive";
-type TransferResult = "completed" | "error" | "stopped";
+type TransferResult = "completed" | "completed_with_issues" | "error" | "stopped";
+
+type TransferIssueRecord = {
+  path: string;
+  message: string;
+};
 
 type TransferHistoryEntry = {
   id: string;
@@ -94,7 +100,10 @@ type TransferHistoryEntry = {
   bytesTransferred?: number;
   elapsedSecs?: number;
   averageMibPerSec?: number;
+  totalFiles?: number;
+  failedFiles?: number;
   integrityVerified?: boolean;
+  issues?: TransferIssueRecord[];
 };
 
 type SendAttemptContext = {
@@ -273,6 +282,10 @@ function stateChipClasses(state: string): string {
     return "bg-accentSoft text-accent";
   }
 
+  if (state === "completed_with_issues") {
+    return "bg-warningSoft text-warningInk";
+  }
+
   if (state === "error") {
     return "bg-dangerSoft text-dangerInk";
   }
@@ -300,6 +313,10 @@ function App() {
   const [systemPrefersDark, setSystemPrefersDark] = useState(() => readSystemPrefersDark());
   const resolvedTheme = themePreference === "system" ? (systemPrefersDark ? "dark" : "light") : themePreference;
   const [showAdvancedSend, setShowAdvancedSend] = useState(false);
+  const [sourcePickerMode, setSourcePickerMode] = useState<SourcePickerMode>("files");
+  const [sourcePickerMenuOpen, setSourcePickerMenuOpen] = useState(false);
+  const [dragDropActive, setDragDropActive] = useState(false);
+  const [dropZoneActive, setDropZoneActive] = useState(false);
 
   const [receivers, setReceivers] = useState<ReceiverListItem[]>([]);
   const [selectedPeerId, setSelectedPeerId] = useState("");
@@ -348,6 +365,8 @@ function App() {
   const lastReceiverTerminalKeyRef = useRef("");
   const workspaceTopRef = useRef<HTMLDivElement | null>(null);
   const didMountWorkspaceRef = useRef(false);
+  const sourcePickerMenuRef = useRef<HTMLDivElement | null>(null);
+  const sourceDropZoneRef = useRef<HTMLDivElement | null>(null);
 
   function updateSendPaused(value: boolean) {
     sendPausedRef.current = value;
@@ -376,6 +395,7 @@ function App() {
 
     if (entry.sourcePath) {
       setSourcePaths([entry.sourcePath]);
+      setSourcePickerMode("files");
       if (tauriReady) {
         void inspectSelectedSource(entry.sourcePath);
       }
@@ -456,6 +476,27 @@ function App() {
   }, [historyEntries]);
 
   useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!sourcePickerMenuRef.current) {
+        return;
+      }
+
+      if (!sourcePickerMenuRef.current.contains(event.target as Node)) {
+        setSourcePickerMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, []);
+
+  useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
       return;
     }
@@ -514,13 +555,64 @@ function App() {
       return;
     }
 
+    let unlistenDragDrop: TauriUnlisten | null = null;
+
+    const setup = async () => {
+      unlistenDragDrop = await getCurrentWindow().onDragDropEvent((event) => {
+        const payload = event.payload;
+
+        if (payload.type === "leave") {
+          setDragDropActive(false);
+          setDropZoneActive(false);
+          return;
+        }
+
+        if (payload.type === "enter") {
+          setDragDropActive(true);
+          setDropZoneActive(isInsideSourceDropZone(payload.position));
+          return;
+        }
+
+        if (payload.type === "over") {
+          setDropZoneActive(isInsideSourceDropZone(payload.position));
+          return;
+        }
+
+        const insideDropZone = isInsideSourceDropZone(payload.position);
+        setDragDropActive(false);
+        setDropZoneActive(false);
+
+        if (!insideDropZone || inspectBusy || sendBusy) {
+          return;
+        }
+
+        void appendQueuedSources(payload.paths, "drop");
+      });
+    };
+
+    void setup();
+
+    return () => {
+      setDragDropActive(false);
+      setDropZoneActive(false);
+      if (unlistenDragDrop) {
+        void unlistenDragDrop();
+      }
+    };
+  }, [appendQueuedSources, inspectBusy, sendBusy, tauriReady]);
+
+  useEffect(() => {
+    if (!tauriReady) {
+      return;
+    }
+
     let unlistenSend: TauriUnlisten | null = null;
     let unlistenReceiver: TauriUnlisten | null = null;
 
     const setup = async () => {
       unlistenSend = await listenSendStatus((payload) => {
         const activeProgressStates = new Set(["starting", "scanning", "sending"]);
-        const terminalStates = new Set(["completed", "error", "stopped", "idle"]);
+        const terminalStates = new Set(["completed", "completed_with_issues", "error", "stopped", "idle"]);
 
         if (payload.state === "paused") {
           updateSendPaused(true);
@@ -540,6 +632,7 @@ function App() {
 
         if (
           payload.state === "completed" ||
+          payload.state === "completed_with_issues" ||
           payload.state === "error" ||
           payload.state === "stopped"
         ) {
@@ -548,6 +641,8 @@ function App() {
             const result: TransferResult =
               payload.state === "completed"
                 ? "completed"
+                : payload.state === "completed_with_issues"
+                ? "completed_with_issues"
                 : payload.state === "stopped"
                 ? "stopped"
                 : "error";
@@ -569,13 +664,19 @@ function App() {
               elapsedSecs: payload.summary?.elapsedSecs,
               averageMibPerSec:
                 payload.summary?.averageMibPerSec ?? payload.progress?.averageMibPerSec,
+              totalFiles: payload.summary?.totalFiles,
+              failedFiles: payload.summary?.failedFiles,
               integrityVerified: payload.summary?.integrityVerified,
+              issues: payload.summary?.issues?.map((issue) => ({
+                path: issue.path,
+                message: issue.message,
+              })),
             });
           }
 
           const activePlan = batchSendPlanRef.current;
           if (
-            payload.state === "completed" &&
+            (payload.state === "completed" || payload.state === "completed_with_issues") &&
             activePlan &&
             activePlan.currentIndex + 1 < activePlan.sources.length
           ) {
@@ -611,7 +712,7 @@ function App() {
         setReceiverStatus(payload);
 
         const activeStates = new Set(["starting", "listening", "receiving"]);
-        const terminalStates = new Set(["completed", "error", "stopped", "idle"]);
+        const terminalStates = new Set(["completed", "completed_with_issues", "error", "stopped", "idle"]);
         if (activeStates.has(payload.state)) {
           setReceiverBusy(true);
         }
@@ -619,7 +720,7 @@ function App() {
           setReceiverBusy(false);
         }
 
-        if (payload.state === "completed" || payload.state === "error") {
+        if (payload.state === "completed" || payload.state === "completed_with_issues" || payload.state === "error") {
           const receiverKey = [
             payload.state,
             payload.message,
@@ -631,7 +732,7 @@ function App() {
           if (lastReceiverTerminalKeyRef.current !== receiverKey) {
             appendHistoryEntry({
               direction: "receive",
-              result: payload.state,
+              result: payload.state as TransferResult,
               message: payload.message,
               sourcePath: payload.remoteAddress ?? undefined,
               destinationPath: payload.savedPath ?? payload.outputDir ?? undefined,
@@ -640,7 +741,13 @@ function App() {
               elapsedSecs: payload.summary?.elapsedSecs,
               averageMibPerSec:
                 payload.summary?.averageMibPerSec ?? payload.progress?.averageMibPerSec,
+              totalFiles: payload.summary?.totalFiles,
+              failedFiles: payload.summary?.failedFiles,
               integrityVerified: payload.summary?.integrityVerified,
+              issues: payload.summary?.issues?.map((issue) => ({
+                path: issue.path,
+                message: issue.message,
+              })),
             });
             lastReceiverTerminalKeyRef.current = receiverKey;
           }
@@ -690,7 +797,7 @@ function App() {
 
   const sendPercent = Math.max(
     0,
-    Math.min(100, sendStatus.progress?.percent ?? (sendStatus.state === "completed" ? 100 : 0))
+    Math.min(100, sendStatus.progress?.percent ?? (["completed", "completed_with_issues"].includes(sendStatus.state) ? 100 : 0))
   );
   const sendRemainingBytes = sendStatus.progress
     ? Math.max(0, sendStatus.progress.totalBytes - sendStatus.progress.transferredBytes)
@@ -707,12 +814,12 @@ function App() {
 
   const receiverPercent = Math.max(
     0,
-    Math.min(100, receiverStatus.progress?.percent ?? (receiverStatus.state === "completed" ? 100 : 0))
+    Math.min(100, receiverStatus.progress?.percent ?? (["completed", "completed_with_issues"].includes(receiverStatus.state) ? 100 : 0))
   );
   const sendIsActive =
-    sendBusy && !["completed", "error", "stopped", "idle"].includes(sendStatus.state);
+    sendBusy && !["completed", "completed_with_issues", "error", "stopped", "idle"].includes(sendStatus.state);
   const receiverIsActive =
-    receiverBusy && !["completed", "error", "stopped", "idle"].includes(receiverStatus.state);
+    receiverBusy && !["completed", "completed_with_issues", "error", "stopped", "idle"].includes(receiverStatus.state);
   const transferBarState = sendIsActive
     ? sendPaused
       ? "paused"
@@ -789,14 +896,52 @@ function App() {
     return ordered;
   }
 
-  async function setSingleSource(path: string) {
-    setSourcePaths([path]);
-    await inspectSelectedSource(path);
+  async function appendQueuedSources(paths: string[], origin: "picker" | "drop" = "picker") {
+    const cleaned = normalizeUniquePaths(paths);
+    if (cleaned.length === 0) {
+      return;
+    }
+
+    const merged = normalizeUniquePaths([...sourcePaths, ...cleaned]);
+    setSourcePaths(merged);
+
+    if (merged.length === 1) {
+      await inspectSelectedSource(merged[0]);
+      return;
+    }
+
+    setSourceSummary(null);
+    setUiNote(
+      origin === "drop"
+        ? `Added ${cleaned.length} item${cleaned.length === 1 ? "" : "s"} to the transfer queue.`
+        : `Queued ${merged.length} source paths for batch send.`
+    );
   }
 
-  async function pickSource(command: "pick_source_file" | "pick_source_folder") {
+  function isInsideSourceDropZone(position: { x: number; y: number }) {
+    if (!sourceDropZoneRef.current || typeof window === "undefined") {
+      return false;
+    }
+
+    const rect = sourceDropZoneRef.current.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    const x = position.x / scale;
+    const y = position.y / scale;
+
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  async function triggerSourcePicker(mode: SourcePickerMode = sourcePickerMode) {
     if (!tauriReady) {
       setUiError("Tauri runtime not available.");
+      return;
+    }
+
+    setSourcePickerMode(mode);
+    setSourcePickerMenuOpen(false);
+
+    if (mode === "files") {
+      await addSourceFiles();
       return;
     }
 
@@ -804,7 +949,7 @@ function App() {
 
     try {
       const selectedPath = await withTimeout(
-        command === "pick_source_file" ? pickSourceFile() : pickSourceFolder(),
+        pickSourceFolder(),
         FILE_PICKER_TIMEOUT_MS,
         "Source picker timed out. Try again or paste a path manually."
       );
@@ -812,7 +957,7 @@ function App() {
         return;
       }
 
-      await setSingleSource(selectedPath);
+      await appendQueuedSources([selectedPath]);
     } catch (error) {
       setUiError(`Could not choose source: ${asErrorMessage(error)}`);
     }
@@ -837,15 +982,7 @@ function App() {
         return;
       }
 
-      const merged = normalizeUniquePaths([...sourcePaths, ...selectedPaths]);
-      setSourcePaths(merged);
-
-      if (merged.length === 1) {
-        await inspectSelectedSource(merged[0]);
-      } else {
-        setSourceSummary(null);
-        setUiNote(`Queued ${merged.length} source paths for batch send.`);
-      }
+      await appendQueuedSources(selectedPaths);
     } catch (error) {
       setUiError(`Could not add files: ${asErrorMessage(error)}`);
     }
@@ -1308,39 +1445,73 @@ function App() {
             </div>
           ) : null}
 
-          <div className="mt-6 space-y-2">
-            {/* <button
-              className="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm font-medium"
-              onClick={() => {
-                void pickSource("pick_source_file");
-              }}
-              disabled={!tauriReady || inspectBusy || sendBusy}
-            >
-              Select File
-            </button> */}
-            <button
-              className="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm font-medium"
-              onClick={() => {
-                void addSourceFiles();
-              }}
-              disabled={!tauriReady || inspectBusy || sendBusy}
-            >
-              Add Files
-            </button>
-            <button
-              className="w-full rounded-xl border border-border bg-surface px-4 py-3 text-left text-sm font-medium"
-              onClick={() => {
-                void pickSource("pick_source_folder");
-              }}
-              disabled={!tauriReady || inspectBusy || sendBusy}
-            >
-              Select Folder
-            </button>
+          <div className="mt-6" ref={sourcePickerMenuRef}>
+            <div className="flex overflow-hidden rounded-xl border border-border bg-surface shadow-sm">
+              <button
+                className="min-w-0 flex-1 px-4 py-3 text-left"
+                onClick={() => {
+                  void triggerSourcePicker();
+                }}
+                disabled={!tauriReady || inspectBusy || sendBusy}
+              >
+                <div className="text-sm font-medium text-ink">Add Items</div>
+                <div className="mt-1 text-[11px] text-muted">
+                  Last used: {sourcePickerMode === "files" ? "Files" : "Folder"}
+                </div>
+              </button>
+              <button
+                className="w-12 border-l border-border text-sm font-semibold text-muted transition hover:bg-surfaceMuted"
+                onClick={() => setSourcePickerMenuOpen((previous) => !previous)}
+                disabled={!tauriReady || inspectBusy || sendBusy}
+                aria-label="Open source picker options"
+              >
+                v
+              </button>
+            </div>
+
+            {sourcePickerMenuOpen ? (
+              <div className="mt-2 overflow-hidden rounded-xl border border-border bg-panel shadow-card">
+                <button
+                  className="block w-full px-4 py-3 text-left text-sm transition hover:bg-surfaceMuted"
+                  onClick={() => {
+                    void triggerSourcePicker("files");
+                  }}
+                  disabled={!tauriReady || inspectBusy || sendBusy}
+                >
+                  Add Files
+                </button>
+                <button
+                  className="block w-full border-t border-border px-4 py-3 text-left text-sm transition hover:bg-surfaceMuted"
+                  onClick={() => {
+                    void triggerSourcePicker("folder");
+                  }}
+                  disabled={!tauriReady || inspectBusy || sendBusy}
+                >
+                  Add Folder
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          <div
+            ref={sourceDropZoneRef}
+            className={`mt-4 rounded-2xl border border-dashed p-4 text-center transition ${
+              dropZoneActive
+                ? "border-accent bg-accentSoft text-accent"
+                : dragDropActive
+                ? "border-accent bg-surfaceMuted text-ink"
+                : "border-border bg-surfaceMuted text-muted"
+            }`}
+          >
+            <div className="text-sm font-semibold text-ink">Drag files and folders here</div>
+            <div className="mt-1 text-[11px]">
+              Drop a mix of files and folders in one step, or use Add Items above.
+            </div>
           </div>
 
           <div className="mt-6 rounded-xl border border-border bg-surface p-3 text-xs text-muted">
             <div className="flex items-center justify-between gap-2">
-              <div className="font-semibold text-ink">Source</div>
+              <div className="font-semibold text-ink">Selected Items</div>
               <div className="text-[11px]">
                 {sourcePaths.length === 0
                   ? "No source selected"
@@ -1478,12 +1649,15 @@ function App() {
                           "rounded-full px-2 py-1 text-[10px] font-mono",
                           entry.result === "completed"
                             ? "bg-accentSoft text-accent"
+                            : entry.result === "completed_with_issues"
+                            ? "bg-warningSoft text-warningInk"
                             : entry.result === "stopped"
                             ? "bg-warningSoft text-warningInk"
                             : "bg-dangerSoft text-dangerInk",
                         ].join(" ")}
                       >
                         {entry.result}
+                      </span>
                       </span>
                     </div>
                     <div className="mt-1 truncate">{entry.message}</div>
@@ -1606,7 +1780,7 @@ function App() {
                 <p className="mt-1 text-sm text-muted">{activeWorkspaceContext.subtitle}</p>
                 {activeWorkspace === "send" ? (
                   <p className="mt-2 text-xs text-muted">
-                    Current mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> � {DESTINATION_MODE_HINTS[destinationMode]}
+                    Current mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> - {DESTINATION_MODE_HINTS[destinationMode]}
                   </p>
                 ) : (
                   <p className="mt-2 text-xs text-muted">{activeWorkspaceContext.hint}</p>
@@ -1725,9 +1899,8 @@ function App() {
             </div>
 
             <div className="mt-3 rounded-xl border border-border bg-surface p-3 text-xs text-muted">
-              Current send mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> � {DESTINATION_MODE_HINTS[destinationMode]}
+              Current send mode: <span className="font-semibold text-ink">{activeDestinationLabel}</span> - {DESTINATION_MODE_HINTS[destinationMode]}
             </div>
-
             {destinationMode === "nearby" ? (
               <div className="mt-5 rounded-xl border border-border bg-surface p-4">
                 <div className="mb-3 flex items-center justify-between">
@@ -2105,6 +2278,8 @@ function App() {
                               "rounded-full px-2 py-1 text-[11px] font-mono",
                               entry.result === "completed"
                                 ? "bg-accentSoft text-accent"
+                                : entry.result === "completed_with_issues"
+                                ? "bg-warningSoft text-warningInk"
                                 : entry.result === "stopped"
                                 ? "bg-warningSoft text-warningInk"
                                 : "bg-dangerSoft text-dangerInk",
@@ -2126,10 +2301,28 @@ function App() {
                         {entry.destinationMode ? <div>Mode: {entry.destinationMode}</div> : null}
                         {entry.bytesTransferred ? <div>Bytes: {formatBytes(entry.bytesTransferred)}</div> : null}
                         {entry.averageMibPerSec ? <div>Speed: {entry.averageMibPerSec.toFixed(2)} MiB/s</div> : null}
+                        {typeof entry.failedFiles === "number" ? <div>Failed files: {entry.failedFiles}</div> : null}
+                        {typeof entry.totalFiles === "number" ? <div>Total files: {entry.totalFiles}</div> : null}
                         {typeof entry.integrityVerified === "boolean" ? (
-                          <div>Integrity: {entry.integrityVerified ? "Verified" : "Not verified"}</div>
+                          <div>
+                            Integrity: {entry.integrityVerified ? (entry.failedFiles ? "Verified for transferred files" : "Verified") : "Not verified"}
+                          </div>
                         ) : null}
                       </div>
+
+                      {entry.issues && entry.issues.length > 0 ? (
+                        <div className="mt-3 rounded-lg border border-border bg-surfaceMuted p-3 text-[11px] text-muted">
+                          <div className="font-semibold text-ink">Issues</div>
+                          <div className="mt-2 space-y-1">
+                            {entry.issues.slice(0, 3).map((issue) => (
+                              <div key={`${entry.id}-${issue.path}`}>
+                                <span className="font-medium text-ink">{issue.path}</span>: {issue.message}
+                              </div>
+                            ))}
+                            {entry.issues.length > 3 ? <div>+{entry.issues.length - 3} more issue(s)</div> : null}
+                          </div>
+                        </div>
+                      ) : null}
 
                       {entry.direction === "send" ? (
                         <div className="mt-3">
@@ -2287,6 +2480,7 @@ function App() {
 }
 
 export default App;
+
 
 
 

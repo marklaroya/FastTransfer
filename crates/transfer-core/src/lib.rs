@@ -394,6 +394,12 @@ pub struct ReceiverReady {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferIssue {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferSummary {
     pub file_name: String,
     pub bytes_transferred: u64,
@@ -401,9 +407,18 @@ pub struct TransferSummary {
     pub average_mib_per_sec: f64,
     pub completed_chunks: u64,
     pub completed_files: u64,
+    pub total_files: u64,
+    pub failed_files: u64,
     pub total_directories: u64,
     pub sha256_hex: String,
     pub integrity_verified: bool,
+    pub issues: Vec<TransferIssue>,
+}
+
+impl TransferSummary {
+    pub fn has_issues(&self) -> bool {
+        self.failed_files > 0 || !self.issues.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -933,4 +948,5 @@ mod tests {
         assert_eq!(plan.peers[0].transport, "quic");
     }
 }
+
 
