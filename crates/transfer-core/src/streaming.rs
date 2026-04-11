@@ -217,14 +217,15 @@ pub(crate) async fn receive_streaming(
     })?;
 
     let package_root = package_root_path(&output_dir, session.root_kind, &session.root_name);
+    let package_root_fs = filesystem_path(&package_root);
     if session.root_kind == PackageItemKind::Directory {
-        if package_root.exists() && !checkpoint.existed() {
+        if package_root_fs.exists() && !checkpoint.existed() {
             bail!(
                 "destination directory already exists, refusing to overwrite: {}",
                 package_root.display()
             );
         }
-        fs::create_dir_all(&package_root)
+        fs::create_dir_all(&package_root_fs)
             .await
             .with_context(|| format!("failed to create package root {}", package_root.display()))?;
     }
@@ -247,7 +248,8 @@ pub(crate) async fn receive_streaming(
                     &session.root_name,
                     &relative_path,
                 )?;
-                fs::create_dir_all(&destination).await.with_context(|| {
+                let destination_fs = filesystem_path(&destination);
+                fs::create_dir_all(&destination_fs).await.with_context(|| {
                     format!("failed to create destination directory {}", destination.display())
                 })?;
                 reporter.set_current_path(Some(display_current_path(&session.root_name, session.root_kind, &relative_path)));
@@ -271,9 +273,11 @@ pub(crate) async fn receive_streaming(
                     &session.root_name,
                     &file_entry.relative_path,
                 )?;
+                let destination_fs = filesystem_path(&destination);
 
                 if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent).await.with_context(|| {
+                    let parent_fs = filesystem_path(parent);
+                    fs::create_dir_all(&parent_fs).await.with_context(|| {
                         format!("failed to create destination parent directory {}", parent.display())
                     })?;
                 }
@@ -282,7 +286,7 @@ pub(crate) async fn receive_streaming(
                     &file_entry.relative_path,
                     file_entry.file_size,
                     &file_entry.file_sha256,
-                ) && destination.exists();
+                ) && destination_fs.exists();
 
                 control
                     .send_message(&ReceiverControlMessage::FileDisposition(StreamFileDisposition {
@@ -305,14 +309,25 @@ pub(crate) async fn receive_streaming(
                     continue;
                 }
 
-                receive_file_chunks(
+                if let Err(error) = receive_file_chunks(
                     &incoming,
                     &destination,
                     &file_entry,
                     &session,
                     &mut reporter,
                 )
-                .await?;
+                .await
+                {
+                    let message = format!("{error:#}");
+                    control
+                        .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                            file_id: file_entry.file_id,
+                            success: false,
+                            message: message.clone(),
+                        }))
+                        .await?;
+                    bail!("failed to receive file {}: {}", file_entry.relative_path, message);
+                }
 
                 match control.read_message().await? {
                     SenderControlMessage::FileComplete(StreamFileComplete { file_id })
@@ -323,10 +338,32 @@ pub(crate) async fn receive_streaming(
                     ),
                 }
 
-                let destination_for_hash = destination.clone();
-                let actual_hash = spawn_blocking(move || sha256_file(&destination_for_hash))
-                    .await
-                    .context("receiver file hashing task panicked")??;
+                let destination_for_hash = filesystem_path(&destination);
+                let actual_hash = match spawn_blocking(move || sha256_file(&destination_for_hash)).await {
+                    Ok(Ok(hash)) => hash,
+                    Ok(Err(error)) => {
+                        let message = format!("receiver failed to hash {}: {error:#}", file_entry.relative_path);
+                        control
+                            .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                                file_id: file_entry.file_id,
+                                success: false,
+                                message: message.clone(),
+                            }))
+                            .await?;
+                        bail!("{message}");
+                    }
+                    Err(error) => {
+                        let message = format!("receiver file hashing task panicked for {}: {error}", file_entry.relative_path);
+                        control
+                            .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                                file_id: file_entry.file_id,
+                                success: false,
+                                message: message.clone(),
+                            }))
+                            .await?;
+                        bail!("{message}");
+                    }
+                };
                 if !verify_sha256(&actual_hash, &file_entry.file_sha256) {
                     control
                         .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
@@ -342,18 +379,24 @@ pub(crate) async fn receive_streaming(
                     bail!("file {} failed SHA-256 verification", file_entry.relative_path);
                 }
 
-                checkpoint
-                    .mark_file_complete(
-                        file_entry.relative_path.clone(),
-                        file_entry.file_size,
-                        file_entry.file_sha256,
-                    )
-                    .with_context(|| {
-                        format!(
-                            "failed to persist receiver streaming checkpoint for {}",
-                            file_entry.relative_path
-                        )
-                    })?;
+                if let Err(error) = checkpoint.mark_file_complete(
+                    file_entry.relative_path.clone(),
+                    file_entry.file_size,
+                    file_entry.file_sha256,
+                ) {
+                    let message = format!(
+                        "failed to persist receiver streaming checkpoint for {}: {error:#}",
+                        file_entry.relative_path
+                    );
+                    control
+                        .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
+                            file_id: file_entry.file_id,
+                            success: false,
+                            message: message.clone(),
+                        }))
+                        .await?;
+                    bail!("{message}");
+                }
 
                 completed_files = completed_files.saturating_add(1);
                 reporter.set_completed_files(completed_files);
@@ -723,11 +766,12 @@ async fn receive_file_chunks(
         );
     }
 
+    let destination_fs = filesystem_path(destination);
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
-        .open(destination)
+        .open(&destination_fs)
         .await
         .with_context(|| format!("failed to open destination file {}", destination.display()))?;
     file.set_len(file_entry.file_size)
@@ -823,10 +867,11 @@ where
     let mut buffer = vec![0_u8; BUFFER_SIZE.min(descriptor.size as usize).max(1)];
     let mut hasher = Sha256State::new();
 
+    let destination_fs = filesystem_path(destination);
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(destination)
+        .open(&destination_fs)
         .await
         .with_context(|| format!("failed to open destination file {}", destination.display()))?;
 
@@ -995,6 +1040,31 @@ fn package_root_path(output_dir: &Path, root_kind: PackageItemKind, root_name: &
     }
 }
 
+fn filesystem_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if !path.is_absolute() {
+            return path.to_path_buf();
+        }
+
+        let text = path.as_os_str().to_string_lossy();
+        if text.starts_with(r"\\?\") {
+            return path.to_path_buf();
+        }
+
+        if let Some(stripped) = text.strip_prefix(r"\\") {
+            return PathBuf::from(format!(r"\\?\UNC\{}", stripped));
+        }
+
+        return PathBuf::from(format!(r"\\?\{}", text));
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
 fn display_current_path(root_name: &str, root_kind: PackageItemKind, relative_path: &str) -> String {
     match root_kind {
         PackageItemKind::Directory => format!("{root_name}/{relative_path}"),
@@ -1015,4 +1085,5 @@ fn root_name(source_path: &Path) -> Result<String> {
             )
         })
 }
+
 
