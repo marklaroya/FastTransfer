@@ -370,6 +370,87 @@ fn pick_local_destination_folder() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn open_path_in_file_manager(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path.trim());
+    if path.trim().is_empty() {
+        return Err("Choose a file or folder first.".to_owned());
+    }
+
+    if !target.exists() {
+        return Err(format!("Path not found: {}", target.display()));
+    }
+
+    open_path_in_file_manager_impl(&target).map_err(format_error)
+}
+
+fn open_path_in_file_manager_impl(target: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        if target.is_file() {
+            command.arg(format!("/select,{}", target.display()));
+        } else {
+            command.arg(target);
+        }
+
+        let status = command
+            .status()
+            .with_context(|| format!("failed to open {} in File Explorer", target.display()))?;
+
+        if !status.success() {
+            anyhow::bail!("File Explorer exited with status {status}");
+        }
+
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = if target.is_file() {
+            Command::new("open")
+                .arg("-R")
+                .arg(target)
+                .status()
+                .with_context(|| format!("failed to reveal {} in Finder", target.display()))?
+        } else {
+            Command::new("open")
+                .arg(target)
+                .status()
+                .with_context(|| format!("failed to open {} in Finder", target.display()))?
+        };
+
+        if !status.success() {
+            anyhow::bail!("Finder exited with status {status}");
+        }
+
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let path_to_open = if target.is_file() {
+            target.parent().unwrap_or(target)
+        } else {
+            target
+        };
+
+        let status = Command::new("xdg-open")
+            .arg(path_to_open)
+            .status()
+            .with_context(|| format!("failed to open {} in the file manager", path_to_open.display()))?;
+
+        if !status.success() {
+            anyhow::bail!("xdg-open exited with status {status}");
+        }
+
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+#[tauri::command]
 async fn list_removable_drives() -> Result<Vec<RemovableDrivePayload>, String> {
     tauri::async_runtime::spawn_blocking(query_removable_drives)
         .await
@@ -1625,6 +1706,7 @@ fn main() {
             pick_certificate_file,
             pick_receive_folder,
             pick_local_destination_folder,
+            open_path_in_file_manager,
             list_removable_drives,
             discover_nearby_receivers,
             start_receiver,

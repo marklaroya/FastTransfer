@@ -191,6 +191,10 @@ export function pickReceiveFolder(): Promise<string | null> {
   return invoke<string | null>("pick_receive_folder");
 }
 
+export function openPathInFileManager(path: string): Promise<void> {
+  return invoke<void>("open_path_in_file_manager", { path });
+}
+
 export function listRemovableDrives(): Promise<RemovableDrive[]> {
   return invoke<RemovableDrive[]>("list_removable_drives");
 }

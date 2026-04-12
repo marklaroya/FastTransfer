@@ -8,6 +8,7 @@ import {
   listRemovableDrives,
   listenReceiverStatus,
   listenSendStatus,
+  openPathInFileManager,
   pickCertificateFile,
   pickLocalDestinationFolder,
   pickReceiveFolder,
@@ -277,6 +278,56 @@ function readSystemPrefersDark(): boolean {
 
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
+function formatTransferStateLabel(
+  state: string,
+  direction: TransferDirection,
+  options?: { progressPhase?: string | null; paused?: boolean }
+): string {
+  if (options?.paused) {
+    return "Paused";
+  }
+
+  if (direction === "send") {
+    if (state === "starting" || state === "scanning") {
+      return "Preparing";
+    }
+
+    if (state === "sending") {
+      return options?.progressPhase === "scanning" ? "Preparing" : "Sending";
+    }
+  }
+
+  if (direction === "receive") {
+    if (state === "starting") {
+      return "Starting";
+    }
+    if (state === "listening") {
+      return "Listening";
+    }
+    if (state === "receiving") {
+      return "Receiving";
+    }
+  }
+
+  switch (state) {
+    case "completed":
+      return "Completed";
+    case "completed_with_issues":
+      return "Completed w/ Issues";
+    case "error":
+      return "Error";
+    case "stopped":
+      return "Stopped";
+    case "idle":
+      return "Idle";
+    default:
+      return state
+        .split("_")
+        .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+        .join(" " );
+  }
+}
+
 function stateChipClasses(state: string): string {
   if (state === "completed" || state === "listening") {
     return "bg-accentSoft text-accent";
@@ -795,6 +846,13 @@ function App() {
     });
   }, [receivers, receiverQuery]);
 
+  const sendStateLabel = formatTransferStateLabel(sendStatus.state, "send", {
+    progressPhase: sendStatus.progress?.phase,
+    paused: sendPaused,
+  });
+  const receiverStateLabel = formatTransferStateLabel(receiverStatus.state, "receive", {
+    progressPhase: receiverStatus.progress?.phase,
+  });
   const sendPercent = Math.max(
     0,
     Math.min(100, sendStatus.progress?.percent ?? (["completed", "completed_with_issues"].includes(sendStatus.state) ? 100 : 0))
@@ -808,7 +866,9 @@ function App() {
       : undefined;
   const sendStatusMeta = sendPaused
     ? `Paused at ${sendPercent.toFixed(2)}%`
-    : sendStatus.state === "sending" && typeof sendEtaSeconds === "number"
+    : sendStateLabel === "Preparing"
+    ? "Preparing files"
+    : sendStateLabel === "Sending" && typeof sendEtaSeconds === "number"
     ? `ETA ${formatDuration(sendEtaSeconds)}`
     : null;
 
@@ -828,9 +888,9 @@ function App() {
     ? receiverStatus.state
     : "idle";
   const transferBarTitle = sendIsActive
-    ? "Send in progress"
+    ? `Send: ${sendStateLabel}`
     : receiverIsActive
-    ? "Receiver active"
+    ? `Receiver: ${receiverStateLabel}`
     : "No active transfer";
   const transferBarMessage = sendIsActive
     ? sendStatus.message
@@ -838,20 +898,46 @@ function App() {
     ? receiverStatus.message
     : "Start sending or start receiver to see live transfer details.";
   const transferBarPercent = sendIsActive ? sendPercent : receiverIsActive ? receiverPercent : 0;
-  const transferBarMeta = sendIsActive
-    ? sendStatusMeta ??
-      (sendStatus.progress
-        ? `${sendStatus.progress.averageMibPerSec.toFixed(2)} MiB/s`
-        : null)
+  const transferThroughput = sendIsActive
+    ? sendStateLabel === "Sending" && sendStatus.progress
+      ? `${sendStatus.progress.averageMibPerSec.toFixed(2)} MiB/s`
+      : null
     : receiverIsActive && receiverStatus.progress
     ? `${receiverStatus.progress.averageMibPerSec.toFixed(2)} MiB/s`
     : null;
+  const transferEta = sendIsActive
+    ? sendPaused
+      ? `Paused at ${sendPercent.toFixed(2)}%`
+      : sendStateLabel === "Preparing"
+      ? "Preparing files"
+      : typeof sendEtaSeconds === "number"
+      ? formatDuration(sendEtaSeconds)
+      : null
+    : receiverIsActive && receiverStateLabel === "Listening"
+    ? "Waiting for sender"
+    : null;
+  const transferBarMeta = transferEta ?? transferThroughput;
   const transferBarCurrentPath = sendIsActive
     ? sendStatus.progress?.currentPath
     : receiverIsActive
     ? receiverStatus.progress?.currentPath
     : null;
   const recentHistoryEntries = historyEntries.slice(0, 3);
+  async function openPathLocation(path: string, label = "location") {
+    if (!tauriReady) {
+      setUiError("Tauri runtime not available.");
+      return;
+    }
+
+    try {
+      setUiError("");
+      await openPathInFileManager(path);
+      setUiNote(`Opened ${label} in your file manager.`);
+    } catch (error) {
+      setUiError(`Could not open ${label}: ${asErrorMessage(error)}`);
+    }
+  }
+
   async function inspectSelectedSource(path: string) {
     if (!tauriReady) {
       return;
@@ -1677,10 +1763,10 @@ function App() {
               </div>
               <div className="flex items-center gap-2">
                 <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(sendStatus.state)}`}>
-                  send: {sendStatus.state}
+                  send: {sendStateLabel}
                 </span>
                 <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(receiverStatus.state)}`}>
-                  recv: {receiverStatus.state}
+                  recv: {receiverStateLabel}
                 </span>
               </div>
             </div>
@@ -1708,12 +1794,10 @@ function App() {
               <div className="rounded-xl border border-border bg-surface p-3 text-xs text-muted">
                 <div className="font-semibold text-ink">Live Metrics</div>
                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
-                  <span>
-                    Send: {sendPercent.toFixed(2)}%
-                    {sendStatusMeta ? ` (${sendStatusMeta})` : ""}
-                  </span>
-                  <span>Receiver: {receiverPercent.toFixed(2)}%</span>
-                  <span>Throughput: {transferBarMeta ?? "-"}</span>
+                  <span>Send: {sendPercent.toFixed(2)}% ({sendStateLabel})</span>
+                  <span>Receiver: {receiverPercent.toFixed(2)}% ({receiverStateLabel})</span>
+                  <span>Throughput: {transferThroughput ?? "-"}</span>
+                  <span>ETA: {transferEta ?? "-"}</span>
                 </div>
               </div>
 
@@ -2246,6 +2330,43 @@ function App() {
                 </div>
               </label>
             </div>
+
+            <div className="mt-4 rounded-xl border border-border bg-surface p-4 text-sm text-muted">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-ink">Receiver Status</div>
+                  <p className="mt-1 text-xs text-muted">{receiverStatus.message}</p>
+                </div>
+                <span className={`rounded-full px-3 py-1 font-mono text-xs ${stateChipClasses(receiverStatus.state)}`}>
+                  {receiverStateLabel}
+                </span>
+              </div>
+
+              <div className="mt-3 grid gap-2 text-xs md:grid-cols-2">
+                {receiverStatus.bindAddr ? <div>Bind: {receiverStatus.bindAddr}</div> : null}
+                {receiverStatus.outputDirLabel || receiverStatus.outputDir ? (
+                  <div>Output: {receiverStatus.outputDirLabel ?? receiverStatus.outputDir}</div>
+                ) : null}
+                {receiverStatus.remoteAddress ? <div>Remote: {receiverStatus.remoteAddress}</div> : null}
+                {receiverStatus.savedPathLabel || receiverStatus.savedPath ? (
+                  <div>Last saved: {receiverStatus.savedPathLabel ?? receiverStatus.savedPath}</div>
+                ) : null}
+              </div>
+
+              {receiverStatus.savedPath ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    className="rounded-xl border border-border bg-surface px-3 py-2 text-xs"
+                    onClick={() => {
+                      void openPathLocation(receiverStatus.savedPath ?? "", "received file location");
+                    }}
+                    disabled={!tauriReady}
+                  >
+                    Open File Location
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </section>
           ) : null}
 
@@ -2324,8 +2445,8 @@ function App() {
                         </div>
                       ) : null}
 
-                      {entry.direction === "send" ? (
-                        <div className="mt-3">
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {entry.direction === "send" ? (
                           <button
                             className="rounded-lg border border-border bg-surface px-3 py-1 text-xs"
                             onClick={() => {
@@ -2335,8 +2456,19 @@ function App() {
                           >
                             Reuse Settings
                           </button>
-                        </div>
-                      ) : null}
+                        ) : null}
+                        {entry.direction === "receive" && entry.destinationPath ? (
+                          <button
+                            className="rounded-lg border border-border bg-surface px-3 py-1 text-xs"
+                            onClick={() => {
+                              void openPathLocation(entry.destinationPath ?? "", "received file location");
+                            }}
+                            disabled={!tauriReady}
+                          >
+                            Open File Location
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>
