@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -28,7 +28,7 @@ use transfer_core::{
     DEFAULT_PARALLELISM,
 };
 
-const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
+const DEFAULT_RECEIVER_PORT: u16 = 5000;
 const DEFAULT_SERVER_NAME: &str = "fasttransfer.local";
 #[cfg(target_os = "windows")]
 const DRIVE_QUERY_TIMEOUT: Duration = Duration::from_secs(4);
@@ -537,9 +537,7 @@ async fn start_receiver(
         return Err("The receiver is already running.".to_owned());
     }
 
-    let bind_addr = DEFAULT_BIND_ADDR
-        .parse::<SocketAddr>()
-        .map_err(|error| format!("invalid default bind address: {error}"))?;
+    let bind_addr = resolve_preferred_receiver_bind_addr()?;
     let runtime_dir = desktop_runtime_dir().map_err(format_error)?;
     let cert_dir = runtime_dir.join("certs");
     let output_dir = match output_dir.filter(|value| !value.trim().is_empty()) {
@@ -1694,6 +1692,58 @@ fn format_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+fn resolve_preferred_receiver_bind_addr() -> Result<SocketAddr, String> {
+    let preferred_ip = detect_preferred_local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    Ok(SocketAddr::new(preferred_ip, DEFAULT_RECEIVER_PORT))
+}
+
+fn detect_preferred_local_ip() -> Option<IpAddr> {
+    const PROBE_TARGETS: [&str; 5] = [
+        "1.1.1.1:80",
+        "8.8.8.8:80",
+        "192.168.1.1:80",
+        "10.0.0.1:80",
+        "172.16.0.1:80",
+    ];
+
+    let mut fallback = None;
+    for target in PROBE_TARGETS {
+        let Some(ip) = probe_local_ip(target) else {
+            continue;
+        };
+
+        if is_preferred_local_ip(ip) {
+            return Some(ip);
+        }
+
+        if fallback.is_none() && is_usable_local_ip(ip) {
+            fallback = Some(ip);
+        }
+    }
+
+    fallback
+}
+
+fn probe_local_ip(target: &str) -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(target).ok()?;
+    Some(socket.local_addr().ok()?.ip())
+}
+
+fn is_preferred_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(address) => !address.is_loopback() && !address.is_unspecified() && (address.is_private() || address.is_link_local()),
+        IpAddr::V6(address) => !address.is_loopback() && !address.is_unspecified(),
+    }
+}
+
+fn is_usable_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(address) => !address.is_loopback() && !address.is_unspecified() && !address.is_broadcast(),
+        IpAddr::V6(address) => !address.is_loopback() && !address.is_unspecified(),
     }
 }
 

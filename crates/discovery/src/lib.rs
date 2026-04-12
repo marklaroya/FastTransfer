@@ -158,12 +158,11 @@ pub fn advertise_receiver(
         FASTTRANSFER_SERVICE_TYPE,
         &instance_name,
         &host_name,
-        "",
+        bind_addr.ip().to_string(),
         bind_addr.port(),
         properties.as_slice(),
     )
-    .context("failed to build the FastTransfer mDNS service info")?
-    .enable_addr_auto();
+    .context("failed to build the FastTransfer mDNS service info")?;
 
     let fullname = service.get_fullname().to_owned();
     daemon
