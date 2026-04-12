@@ -80,6 +80,26 @@ impl PersistentFileResumeState {
         Ok(state)
     }
 
+
+    pub fn load_or_recreate_in(
+        base_dir: &Path,
+        root_name: &str,
+        root_kind: PackageItemKind,
+        chunk_size: u32,
+    ) -> io::Result<Self> {
+        match Self::load_or_create_in(base_dir, root_name, root_kind, chunk_size) {
+            Ok(state) => Ok(state),
+            Err(error) if error.kind() == ErrorKind::InvalidData => {
+                let checkpoint_path = checkpoint_dir(base_dir).join(checkpoint_file_name(root_name, root_kind));
+                if checkpoint_path.exists() {
+                    fs::remove_file(&checkpoint_path)?;
+                }
+                Self::load_or_create_in(base_dir, root_name, root_kind, chunk_size)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn existed(&self) -> bool {
         self.existed
     }

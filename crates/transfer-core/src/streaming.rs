@@ -81,7 +81,7 @@ pub(crate) async fn send_streaming(
     reporter.set_phase("scanning");
 
     let checkpoint_dir = sender_checkpoint_base_dir(&source_path).to_path_buf();
-    let mut checkpoint = PersistentFileResumeState::load_or_create_in(
+    let mut checkpoint = PersistentFileResumeState::load_or_recreate_in(
         &checkpoint_dir,
         &root_name,
         root_kind,
