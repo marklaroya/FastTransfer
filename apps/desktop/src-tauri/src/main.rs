@@ -398,14 +398,10 @@ fn open_path_in_file_manager_impl(target: &Path) -> Result<()> {
             resolved_target.clone()
         };
 
-        let status = Command::new("explorer.exe")
+        Command::new("explorer.exe")
             .arg(&folder_to_open)
-            .status()
+            .spawn()
             .with_context(|| format!("failed to open {} in File Explorer", folder_to_open.display()))?;
-
-        if !status.success() {
-            anyhow::bail!("File Explorer exited with status {status}");
-        }
 
         return Ok(());
     }
