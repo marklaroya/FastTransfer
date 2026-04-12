@@ -41,13 +41,14 @@ pub struct StreamFileEntry {
     pub file_id: u32,
     pub relative_path: String,
     pub file_size: u64,
-    pub file_sha256: Sha256Hash,
+    pub file_sha256: Option<Sha256Hash>,
     pub chunk_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamFileComplete {
     pub file_id: u32,
+    pub file_sha256: Sha256Hash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +161,7 @@ mod tests {
             file_id: 7,
             relative_path: "nested/cat.jpg".to_owned(),
             file_size: 4096,
-            file_sha256: sha256_bytes(b"cat"),
+            file_sha256: Some(sha256_bytes(b"cat")),
             chunk_count: 4,
         });
         let encoded = file.encode().expect("file should encode");
@@ -174,7 +175,10 @@ mod tests {
         let decoded = SenderControlMessage::decode(&encoded).expect("directory should decode");
         assert_eq!(decoded, directory);
 
-        let complete = SenderControlMessage::FileComplete(StreamFileComplete { file_id: 7 });
+        let complete = SenderControlMessage::FileComplete(StreamFileComplete {
+            file_id: 7,
+            file_sha256: sha256_bytes(b"cat"),
+        });
         let encoded = complete.encode().expect("complete should encode");
         let decoded = SenderControlMessage::decode(&encoded).expect("complete should decode");
         assert_eq!(decoded, complete);

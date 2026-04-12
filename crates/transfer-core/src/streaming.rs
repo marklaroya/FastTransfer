@@ -88,6 +88,7 @@ pub(crate) async fn send_streaming(
         request.chunk_size.max(1),
     )
     .with_context(|| format!("failed to load sender streaming checkpoint for {}", source_path.display()))?;
+    let resume_from_existing_checkpoint = checkpoint.existed() && checkpoint.has_progress();
 
     let transport = Arc::new(
         QuicSender::connect(request.server_addr, &request.server_name, &request.certificate_path).await?,
@@ -131,6 +132,7 @@ pub(crate) async fn send_streaming(
             &mut issues,
             &mut aggregate_hasher,
             transfer_control.as_ref(),
+            resume_from_existing_checkpoint,
         )
         .await?;
     } else {
@@ -153,6 +155,7 @@ pub(crate) async fn send_streaming(
             &mut issues,
             &mut aggregate_hasher,
             transfer_control.as_ref(),
+            resume_from_existing_checkpoint,
         )
         .await?;
     }
@@ -349,11 +352,17 @@ pub(crate) async fn receive_streaming(
                     }
                 }
 
-                let already_complete = checkpoint.is_file_complete(
-                    &file_entry.relative_path,
-                    file_entry.file_size,
-                    &file_entry.file_sha256,
-                ) && destination_fs.exists();
+                let already_complete = file_entry
+                    .file_sha256
+                    .as_ref()
+                    .map(|file_sha256| {
+                        checkpoint.is_file_complete(
+                            &file_entry.relative_path,
+                            file_entry.file_size,
+                            file_sha256,
+                        ) && destination_fs.exists()
+                    })
+                    .unwrap_or(false);
 
                 control
                     .send_message(&ReceiverControlMessage::FileDisposition(StreamFileDisposition {
@@ -367,7 +376,7 @@ pub(crate) async fn receive_streaming(
                     completed_files = completed_files.saturating_add(1);
                     completed_bytes = completed_bytes.saturating_add(file_entry.file_size);
                     completed_chunks = completed_chunks.saturating_add(file_entry.chunk_count);
-                    aggregate_hasher.update(&file_entry.file_sha256);
+                    aggregate_hasher.update(file_entry.file_sha256.as_ref().expect("already complete files require known hash"));
                     reporter.set_completed_files(completed_files);
                     control
                         .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
@@ -388,14 +397,14 @@ pub(crate) async fn receive_streaming(
                 )
                 .await;
 
-                match control.read_message().await? {
-                    SenderControlMessage::FileComplete(StreamFileComplete { file_id })
-                        if file_id == file_entry.file_id => {}
+                let file_sha256 = match control.read_message().await? {
+                    SenderControlMessage::FileComplete(StreamFileComplete { file_id, file_sha256 })
+                        if file_id == file_entry.file_id => file_sha256,
                     other => bail!(
                         "expected file-complete for file {} but got {other:?}",
                         file_entry.file_id
                     ),
-                }
+                };
 
                 if let Err(error) = receive_result {
                     let message = format!("failed to receive {}: {error:#}", file_entry.relative_path);
@@ -438,10 +447,10 @@ pub(crate) async fn receive_streaming(
                         continue;
                     }
                 };
-                if !verify_sha256(&actual_hash, &file_entry.file_sha256) {
+                if !verify_sha256(&actual_hash, &file_sha256) {
                     let message = format!(
                         "integrity mismatch: expected {}, got {}",
-                        format_sha256(&file_entry.file_sha256),
+                        format_sha256(&file_sha256),
                         format_sha256(&actual_hash)
                     );
                     control
@@ -458,7 +467,7 @@ pub(crate) async fn receive_streaming(
                 if let Err(error) = checkpoint.mark_file_complete(
                     file_entry.relative_path.clone(),
                     file_entry.file_size,
-                    file_entry.file_sha256,
+                    file_sha256,
                 ) {
                     let message = format!(
                         "failed to persist receiver streaming checkpoint for {}: {error:#}",
@@ -478,7 +487,7 @@ pub(crate) async fn receive_streaming(
                 completed_files = completed_files.saturating_add(1);
                 completed_bytes = completed_bytes.saturating_add(file_entry.file_size);
                 completed_chunks = completed_chunks.saturating_add(file_entry.chunk_count);
-                aggregate_hasher.update(&file_entry.file_sha256);
+                aggregate_hasher.update(&file_sha256);
                 reporter.set_completed_files(completed_files);
                 control
                     .send_message(&ReceiverControlMessage::FileResult(StreamFileResult {
@@ -555,7 +564,7 @@ pub(crate) async fn receive_streaming(
             SenderControlMessage::SessionStart(_) => {
                 bail!("received duplicate session-start control message")
             }
-            SenderControlMessage::FileComplete(StreamFileComplete { file_id }) => {
+            SenderControlMessage::FileComplete(StreamFileComplete { file_id, .. }) => {
                 bail!("received unexpected file-complete for file id {file_id}")
             }
         }
@@ -582,6 +591,7 @@ async fn stream_directory(
     issues: &mut Vec<TransferIssue>,
     aggregate_hasher: &mut Sha256State,
     transfer_control: Option<&TransferControl>,
+    resume_from_existing_checkpoint: bool,
 ) -> Result<()> {
     let mut stack = vec![DirectoryFrame {
         entries: read_sorted_entries(source_root)?,
@@ -642,6 +652,7 @@ async fn stream_directory(
                 issues,
                 aggregate_hasher,
                 transfer_control,
+                resume_from_existing_checkpoint,
             )
             .await?;
         }
@@ -669,6 +680,7 @@ async fn process_file(
     issues: &mut Vec<TransferIssue>,
     aggregate_hasher: &mut Sha256State,
     transfer_control: Option<&TransferControl>,
+    resume_from_existing_checkpoint: bool,
 ) -> Result<()> {
     wait_for_transfer_control(transfer_control).await?;
     let metadata = match stdfs::metadata(source_path) {
@@ -697,27 +709,31 @@ async fn process_file(
     }
 
     let file_size = metadata.len();
-    let source_for_hash = source_path.to_path_buf();
-    let file_sha256 = match spawn_blocking(move || sha256_file(&source_for_hash)).await {
-        Ok(Ok(hash)) => hash,
-        Ok(Err(error)) => {
-            record_transfer_issue(
-                issues,
-                failed_files,
-                &relative_path,
-                format!("sender failed to hash {relative_path}: {error:#}"),
-            );
-            return Ok(());
-        }
-        Err(error) => {
-            record_transfer_issue(
-                issues,
-                failed_files,
-                &relative_path,
-                format!("sender file hashing task panicked for {relative_path}: {error}"),
-            );
-            return Ok(());
-        }
+    let known_file_sha256 = if resume_from_existing_checkpoint {
+        let source_for_hash = source_path.to_path_buf();
+        Some(match spawn_blocking(move || sha256_file(&source_for_hash)).await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(error)) => {
+                record_transfer_issue(
+                    issues,
+                    failed_files,
+                    &relative_path,
+                    format!("sender failed to hash {relative_path}: {error:#}"),
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                record_transfer_issue(
+                    issues,
+                    failed_files,
+                    &relative_path,
+                    format!("sender file hashing task panicked for {relative_path}: {error}"),
+                );
+                return Ok(());
+            }
+        })
+    } else {
+        None
     };
 
     let descriptors = FixedChunker::new(file_size, request.chunk_size.max(1)).descriptors();
@@ -740,7 +756,7 @@ async fn process_file(
             file_id,
             relative_path: relative_path.clone(),
             file_size,
-            file_sha256,
+            file_sha256: known_file_sha256,
             chunk_count,
         }))
         .await?;
@@ -752,9 +768,9 @@ async fn process_file(
         other => bail!("expected file-disposition for file {} but got {other:?}", file_id),
     };
 
-    if disposition.needed {
+    let file_sha256 = if disposition.needed {
         reporter.set_phase("sending");
-        send_file_chunks(
+        let file_sha256 = send_file_chunks(
             source_path,
             file_id,
             &descriptors,
@@ -766,9 +782,12 @@ async fn process_file(
         .await?;
 
         control
-            .send_message(&SenderControlMessage::FileComplete(StreamFileComplete { file_id }))
+            .send_message(&SenderControlMessage::FileComplete(StreamFileComplete { file_id, file_sha256 }))
             .await?;
-    }
+        file_sha256
+    } else {
+        known_file_sha256.ok_or_else(|| anyhow::anyhow!("receiver skipped file without a known sender hash"))?
+    };
 
     let result = match control.read_message().await? {
         ReceiverControlMessage::FileResult(result) if result.file_id == file_id => result,
@@ -816,12 +835,13 @@ async fn send_file_chunks(
     transport: &Arc<QuicSender>,
     reporter: &mut ProgressReporter,
     transfer_control: Option<&TransferControl>,
-) -> Result<()> {
+) -> Result<integrity::Sha256Hash> {
     if descriptors.is_empty() {
-        return Ok(());
+        return Ok([0_u8; 32]);
     }
 
     let concurrency = parallelism.max(1).min(descriptors.len().max(1));
+    let mut file_hasher = Sha256State::new();
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut join_set = JoinSet::new();
 
@@ -857,6 +877,7 @@ async fn send_file_chunks(
             .await
             .with_context(|| format!("failed to read source chunk {}", descriptor.index))?;
         current_offset = current_offset.saturating_add(u64::from(descriptor.size));
+        file_hasher.update(&payload);
 
         let transport = Arc::clone(transport);
         join_set.spawn(async move {
@@ -877,7 +898,7 @@ async fn send_file_chunks(
         reporter.advance(sent_size);
     }
 
-    Ok(())
+    Ok(file_hasher.finalize())
 }
 
 async fn receive_file_chunks(
