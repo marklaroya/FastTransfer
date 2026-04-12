@@ -386,16 +386,22 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
 fn open_path_in_file_manager_impl(target: &Path) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("explorer");
-        if target.is_file() {
-            command.arg(format!("/select,{}", target.display()));
+        let resolved_target = target
+            .canonicalize()
+            .with_context(|| format!("failed to resolve {} before opening File Explorer", target.display()))?;
+        let folder_to_open = if resolved_target.is_file() {
+            resolved_target
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| resolved_target.clone())
         } else {
-            command.arg(target);
-        }
+            resolved_target.clone()
+        };
 
-        let status = command
+        let status = Command::new("explorer.exe")
+            .arg(&folder_to_open)
             .status()
-            .with_context(|| format!("failed to open {} in File Explorer", target.display()))?;
+            .with_context(|| format!("failed to open {} in File Explorer", folder_to_open.display()))?;
 
         if !status.success() {
             anyhow::bail!("File Explorer exited with status {status}");
